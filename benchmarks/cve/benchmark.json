@@ -1,0 +1,41 @@
+{
+  "name": "openplow-cve",
+  "targets": [
+    {
+      "name": "cve-2007-4559-tarfile",
+      "path": "targets/cve-2007-4559-tarfile",
+      "expected": [
+        {"id": "cve-2007-4559", "file": "src/extract.py",
+         "attack_class": "data-isolation-and-lifecycle",
+         "symbol": "extract", "line_range": [1, 14]}
+      ]
+    },
+    {
+      "name": "zip-slip",
+      "path": "targets/zip-slip",
+      "expected": [
+        {"id": "zip-slip", "file": "src/unzip.py",
+         "attack_class": "data-isolation-and-lifecycle",
+         "symbol": "unzip", "line_range": [1, 20]}
+      ]
+    },
+    {
+      "name": "sqli-sqlite",
+      "path": "targets/sqli-sqlite",
+      "expected": [
+        {"id": "sqli", "file": "src/auth.py",
+         "attack_class": "web-protocol-and-auth",
+         "symbol": "login", "line_range": [1, 18]}
+      ]
+    },
+    {
+      "name": "cmd-injection",
+      "path": "targets/cmd-injection",
+      "expected": [
+        {"id": "cmd-injection", "file": "src/net.py",
+         "attack_class": "cloud-and-deployment",
+         "symbol": "ping", "line_range": [1, 14]}
+      ]
+    }
+  ]
+}

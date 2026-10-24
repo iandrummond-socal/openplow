@@ -5,6 +5,13 @@ vulnerabilities, plus a spec that points at them. The harness runs the full
 OpenPlow pipeline over every target and scores the findings against the
 manifests.
 
+## Suites
+
+- `sample/` — two tiny made-up targets, the smallest end-to-end scoring demo.
+- `cve/` — four targets reproducing real advisories (CVE-2007-4559 tarfile
+  traversal, Zip Slip, SQL injection, OS command injection), each with a working
+  PoC and the real fix. See [`cve/README.md`](cve/README.md).
+
 ## Run the sample
 
 Deterministic, no API key — the `fixture` adapter replays canned findings so you
@@ -13,6 +20,14 @@ can see the scoring end to end:
 ```bash
 openplow benchmark benchmarks/sample/benchmark.json \
   --adapter fixture:benchmarks/sample/fixture.json \
+  --out openplow-benchmarks
+```
+
+Or the CVE suite:
+
+```bash
+openplow benchmark benchmarks/cve/benchmark.json \
+  --adapter fixture:benchmarks/cve/fixture.json \
   --out openplow-benchmarks
 ```
 

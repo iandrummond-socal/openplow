@@ -93,3 +93,33 @@ def test_sample_benchmark_full_recall(tmp_path):
     assert report.totals["confirmed_recall"] == 1.0
     assert (tmp_path / "out" / "benchmark-report.md").exists()
     assert (tmp_path / "out" / "benchmark-results.json").exists()
+
+
+# ---- CVE benchmark: real reproductions, PoC + patch gate ----------------
+
+CVE_SPEC = Path(__file__).resolve().parent.parent / "benchmarks" / "cve" / "benchmark.json"
+CVE_FIXTURE = Path(__file__).resolve().parent.parent / "benchmarks" / "cve" / "fixture.json"
+
+
+def test_cve_benchmark_recall_and_fix_gate(tmp_path):
+    spec = bm.load_spec(CVE_SPEC)
+    assert len(spec.targets) == 4
+    report = bm.run_benchmark(
+        spec, finder_spec=f"fixture:{CVE_FIXTURE}", validator_spec=f"fixture:{CVE_FIXTURE}",
+        sandbox_kind="stub", out_dir=tmp_path / "out",
+    )
+    assert report.totals["recall"] == 1.0
+    assert report.totals["confirmed_recall"] == 1.0
+
+    # Every confirmed finding's PoC reproduced and its real fix flipped the gate.
+    import json
+    results = json.loads((tmp_path / "out" / "benchmark-results.json").read_text())
+    assert results["totals"]["confirmed_matched"] == 4
+
+    gated = 0
+    for fjson in (tmp_path / "out").glob("bench-*/findings.json"):
+        for f in json.loads(fjson.read_text()):
+            if f.get("verdict") == "confirmed":
+                assert (f.get("fix") or {}).get("gate_passed") is True, f["id"]
+                gated += 1
+    assert gated == 4

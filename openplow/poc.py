@@ -57,18 +57,29 @@ class PatchGate:
     reason: str = ""
 
 
-def _hash_tree(root: Path, exclude: set[Path]) -> str:
-    """Stable hash of every source file under root, except the given paths."""
-    h = hashlib.sha256()
+def _snapshot(root: Path, exclude: set[Path]) -> dict[str, str]:
+    """Hash of every pre-existing source file under root, keyed by relative path."""
+    snap: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path in exclude:
             continue
         rel = path.relative_to(root)
         if any(part in {".git", "node_modules", "__pycache__"} for part in rel.parts):
             continue
-        h.update(str(rel).encode())
-        h.update(path.read_bytes())
-    return h.hexdigest()
+        snap[str(rel)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return snap
+
+
+def _tampered(root: Path, before: dict[str, str], exclude: set[Path]) -> bool:
+    """True if any file present before the run was modified or removed. Files the
+    exploit newly *creates* are not tampering — only edits to existing source are."""
+    for rel, digest in before.items():
+        path = root / rel
+        if path in exclude:
+            continue
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            return True
+    return False
 
 
 def _poc_filename(poc: dict[str, Any]) -> str:
@@ -127,11 +138,10 @@ def run_poc(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
     if shutil.which(runner[0]) is None:
         return PocRun(attempted=False, reason=f"runtime {runner[0]!r} not available")
 
-    before = _hash_tree(target, exclude={poc_path})
+    before = _snapshot(target, exclude={poc_path})
     demonstrated, output, rc, timed_out = _demonstrates(sandbox, target, poc_path, poc)
-    after = _hash_tree(target, exclude={poc_path})
+    integrity_ok = not _tampered(target, before, exclude={poc_path})
 
-    integrity_ok = before == after
     reason = ""
     if not integrity_ok:
         reason = "PoC modified pre-existing source (tampering)"
@@ -216,22 +226,25 @@ def run_patch_gate(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
     if not finding.get("patch"):
         return PatchGate(attempted=False, reason="no patch to gate")
 
-    target, poc_path = _prepare_target(repo, workdir, poc)
-    runner = _RUNNERS.get(poc_path.suffix)
+    # Fresh copy for the "before" run so its artifacts never leak into "after".
+    tb, pb = _prepare_target(repo, workdir / "before", poc)
+    runner = _RUNNERS.get(pb.suffix)
     if runner is None or shutil.which(runner[0]) is None:
-        return PatchGate(attempted=False, reason=f"no runtime for {poc_path.suffix}")
+        return PatchGate(attempted=False, reason=f"no runtime for {pb.suffix}")
 
-    before, _, _, _ = _demonstrates(sandbox, target, poc_path, poc)
+    before, _, _, _ = _demonstrates(sandbox, tb, pb, poc)
     if not before:
         return PatchGate(attempted=True, reproduced_before=False,
                          reason="PoC did not reproduce before patch")
 
-    applied, areason = apply_patch(target, finding)
+    # Separate fresh copy for the "after" run, patched.
+    ta, pa = _prepare_target(repo, workdir / "after", poc)
+    applied, areason = apply_patch(ta, finding)
     if not applied:
         return PatchGate(attempted=True, reproduced_before=True, patch_applied=False,
                          reason=f"patch did not apply: {areason}")
 
-    after, _, _, _ = _demonstrates(sandbox, target, poc_path, poc)
+    after, _, _, _ = _demonstrates(sandbox, ta, pa, poc)
     passed = not after
     reason = "fail->pass flip verified" if passed else "PoC still reproduces after patch"
     return PatchGate(attempted=True, reproduced_before=True, patch_applied=True,

@@ -38,8 +38,11 @@ Components 9–13 plus an evaluation suite.
 - [x] `fixture` adapter for deterministic, no-API-key benchmark/scoring runs
 - [x] Fix: task identity scoped to `(run_id, task_id)` so several runs share one DB (surfaced by the benchmark)
 - [x] Fix: a re-hunt no longer resets an already-stored finding (first report of an id wins)
+- [x] CVE benchmark suite: 4 real-advisory reproductions (CVE-2007-4559, Zip Slip, SQLi, cmd injection) with working PoCs + real fixes; all confirm and pass the patch gate (`benchmarks/cve/`)
+- [x] PoC integrity model: only edits to *pre-existing* source count as tampering (new files an exploit creates are fine); patch gate uses separate fresh copies for before/after
 - [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
 - [ ] More gapfill rounds driven by a coverage metric rather than a fixed cap
+- [ ] Add upstream CVE-fix targets (check out the pre-fix commit) alongside the reproductions
 
 ## M3 — Fleet
 Components 14–17.
