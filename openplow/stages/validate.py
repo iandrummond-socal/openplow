@@ -131,9 +131,22 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         "poc_attempted": run.attempted, "poc_demonstrated": run.demonstrated,
         "poc_reason": run.reason,
     }
+
+    # Fail->pass patch gate on confirmed findings that ship a patch.
+    fix_verified = False
+    if verdict == "confirmed" and finding.get("patch"):
+        gate = poc_mod.run_patch_gate(ctx.sandbox, ctx.repo, finding,
+                                      ctx.out_dir / "scratch" / finding_id / "gate")
+        fix_verified = gate.passed
+        finding["fix"] = {
+            "gate_passed": gate.passed, "reproduced_before": gate.reproduced_before,
+            "patch_applied": gate.patch_applied, "reproduced_after": gate.reproduced_after,
+            "reason": gate.reason,
+        }
+
     ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "validate", finding)
     return {"finding_id": finding_id, "verdict": finding["verdict"],
-            "poc_demonstrated": run.demonstrated}
+            "poc_demonstrated": run.demonstrated, "fix_verified": fix_verified}
 
 
 def _reject(ctx: RunContext, finding: dict[str, Any], finding_id: str,

@@ -48,6 +48,10 @@ confirmation gate, and a PoC that edits source to "work" is rejected as tampered
 — then a fresh agent (a different model) tries to disprove the finding. The
 validator can never file one itself.
 
+For a confirmed finding that ships a patch, the **fail→pass patch gate** then
+runs: the PoC must reproduce, the patch is applied to the copy, and the PoC must
+stop reproducing. Only a clean flip marks the fix verified (`fix.gate_passed`).
+
 ## Install
 
 ```bash
@@ -113,7 +117,7 @@ to score a real model. See [`benchmarks/README.md`](benchmarks/README.md).
 | `openplow/db.py` | SQLite state store keyed by `(run_id, repo, stage)` |
 | `openplow/models.py` | Model-adapter interface + stub adapter |
 | `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps (stub + unshare) |
-| `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects source tampering |
+| `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects tampering; fail→pass patch gate |
 | `openplow/stages/` | `recon`, `hunt`, `validate`, `gapfill`, `dedup`, `report` |
 | `openplow/benchmark.py` | Runs the pipeline over known-vuln targets and scores recall + noise |
 | `openplow/schemas/` | Finding JSON schema |

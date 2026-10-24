@@ -50,8 +50,8 @@
         "description": "read_file() joins the base dir with an unsanitised name, so '../../etc/passwd' escapes BASE.",
         "poc": {
           "kind": "script",
-          "content": "import importlib.util, os\ns = importlib.util.spec_from_file_location('files', 'src/files.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nreal = os.path.normpath(os.path.join(m.BASE, '../../etc/passwd'))\nassert not real.startswith(m.BASE), real\nprint('TRAVERSAL', real)\n",
-          "observed": "TRAVERSAL"
+          "content": "import importlib.util\ns = importlib.util.spec_from_file_location('files', 'src/files.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nprint(m.read_file('../../secret.txt'))\n",
+          "observed": "TOPSECRET"
         },
         "patch": "-    path = os.path.join(BASE, name)\n+    path = os.path.join(BASE, name)\n+    if not os.path.realpath(path).startswith(os.path.realpath(BASE)):\n+        raise ValueError('path traversal')"
       }

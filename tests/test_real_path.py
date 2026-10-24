@@ -231,3 +231,60 @@ def test_validate_rejects_when_poc_tampers(tmp_path, target_repo):
     ctx.store.upsert_finding("run-real", target_repo.name, "hunt", finding)
     result = validate.run_task(ctx, {"finding_id": "sqli-1"})
     assert result["verdict"] == "rejected"
+
+
+# ---- fail->pass patch gate ----------------------------------------------
+
+def test_apply_snippet_patch(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def h(x):\n    return eval(x)\n")
+    finding = {"location": {"file": "src/app.py"},
+               "patch": "-    return eval(x)\n+    return int(x)"}
+    target, _ = poc_mod._prepare_target(repo, tmp_path / "w", {"kind": "script", "content": "x"})
+    ok, reason = poc_mod.apply_patch(target, finding)
+    assert ok, reason
+    assert "return int(x)" in (target / "src" / "app.py").read_text()
+
+
+def test_patch_gate_passes_on_real_fix(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def handler(req):\n    return eval(req)\n")
+    finding = {
+        "location": {"file": "src/app.py"},
+        "poc": {"kind": "script", "observed": "PWNED",
+                "content": "import importlib.util\n"
+                           "s = importlib.util.spec_from_file_location('app','src/app.py')\n"
+                           "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+                           "print('PWNED', m.handler('6*7'))\n"},
+        "patch": "-    return eval(req)\n+    return int(req)",
+    }
+    gate = poc_mod.run_patch_gate(_sandbox(tmp_path), repo, finding, tmp_path / "g")
+    assert gate.attempted and gate.reproduced_before and gate.patch_applied
+    assert not gate.reproduced_after and gate.passed
+
+
+def test_patch_gate_fails_when_patch_does_not_fix(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def handler(req):\n    return eval(req)\n")
+    finding = {
+        "location": {"file": "src/app.py"},
+        "poc": {"kind": "script", "observed": "PWNED",
+                "content": "import importlib.util\n"
+                           "s = importlib.util.spec_from_file_location('app','src/app.py')\n"
+                           "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+                           "print('PWNED', m.handler('6*7'))\n"},
+        # a no-op patch (adds a comment) that leaves the vuln intact
+        "patch": "-    return eval(req)\n+    return eval(req)  # TODO",
+    }
+    gate = poc_mod.run_patch_gate(_sandbox(tmp_path), repo, finding, tmp_path / "g")
+    assert gate.attempted and gate.reproduced_before and gate.patch_applied
+    assert gate.reproduced_after and not gate.passed
+
+
+def test_patch_gate_not_attempted_without_patch(tmp_path, target_repo):
+    finding = {"poc": {"kind": "script", "content": "print('x')\n"}}
+    gate = poc_mod.run_patch_gate(_sandbox(tmp_path), target_repo, finding, tmp_path / "g")
+    assert not gate.attempted

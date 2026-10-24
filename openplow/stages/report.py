@@ -56,6 +56,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     confirmed = [f for f in distinct if f.get("verdict") == "confirmed"]
     needs = [f for f in distinct if f.get("verdict") == "needs_validation"]
     rejected = [f for f in distinct if f.get("verdict") == "rejected"]
+    fix_verified = [f for f in confirmed if (f.get("fix") or {}).get("gate_passed")]
 
     (ctx.out_dir / "findings.json").write_text(json.dumps(all_findings, indent=2) + "\n")
     (ctx.out_dir / "openplow.sarif").write_text(
@@ -70,6 +71,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         "## Summary",
         "",
         f"- Confirmed: {len(confirmed)}",
+        f"- Fix verified (fail->pass patch gate): {len(fix_verified)}",
         f"- Needs validation: {len(needs)}",
         f"- Rejected: {len(rejected)}",
         f"- Duplicates folded: {folded}",
@@ -82,6 +84,10 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
             lines.append(f"### {f.get('title', f['id'])}")
             lines.append(f"- Class: {f.get('attack_class')}  ·  Severity: {f.get('severity')}")
             lines.append(f"- Location: `{loc.get('file')}:{loc.get('line', '')}`")
+            fix = f.get("fix") or {}
+            if fix:
+                mark = "yes" if fix.get("gate_passed") else "no"
+                lines.append(f"- Fix verified: {mark} ({fix.get('reason', '')})")
             lines.append("")
 
     wishes = ctx.store.wishes(ctx.run_id)
@@ -93,6 +99,6 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
 
     (ctx.out_dir / "REPORT.md").write_text("\n".join(lines) + "\n")
 
-    return {"confirmed": len(confirmed), "needs_validation": len(needs),
-            "rejected": len(rejected), "duplicates_folded": folded,
-            "out_dir": str(ctx.out_dir)}
+    return {"confirmed": len(confirmed), "fix_verified": len(fix_verified),
+            "needs_validation": len(needs), "rejected": len(rejected),
+            "duplicates_folded": folded, "out_dir": str(ctx.out_dir)}

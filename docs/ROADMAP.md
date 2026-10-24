@@ -25,7 +25,7 @@ Components 1–8, one repo, CLI only.
 - [x] Harden the sandbox: cleaned env, net isolation (`unshare --net`), rlimit caps — cpu, file size, procs, optional address space (`sandbox.py`)
 - [x] Run PoCs against a pristine copy with source-integrity (tamper) detection (`poc.py`); reproduction is the confirmation gate
 - [ ] Sandbox: seccomp profile, read-only bind of the target, cgroup-v2 memory cap
-- [ ] Fail→pass patch gate (run PoC, apply the finding's patch, confirm it no longer reproduces)
+- [x] Fail→pass patch gate: reproduce → apply the finding's patch → must not reproduce; only a clean flip passes (`poc.run_patch_gate`, wired into validate; `fix.gate_passed` on confirmed findings, counted in the report)
 
 ## M2 — Coverage
 Components 9–13 plus an evaluation suite.
