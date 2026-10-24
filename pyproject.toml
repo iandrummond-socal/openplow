@@ -24,7 +24,9 @@ dependencies = []
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40.0"]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+# Full JSON-schema validation of findings; without it a minimal check is used.
+schema = ["jsonschema>=4.0"]
+dev = ["pytest>=8.0", "ruff>=0.6", "jsonschema>=4.0"]
 
 [project.scripts]
 openplow = "openplow.cli:main"

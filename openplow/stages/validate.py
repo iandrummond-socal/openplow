@@ -43,24 +43,48 @@ def _pass1_deterministic(ctx: RunContext, finding: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[bool, str]:
+def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, str]:
     """Ask a fresh validator model to disprove the finding.
 
-    Returns (disproved, notes). The stub cannot disprove, so a finding that
-    clears Pass 1 stays needs_validation (it is never auto-confirmed without a
-    real adversarial check)."""
+    Returns ``(verdict, notes)`` where verdict is one of ``confirmed``,
+    ``rejected``, or ``needs_validation``. The validator must end with a line
+    ``VERDICT: <value>``. The stub cannot judge, so a finding that clears Pass 1
+    stays ``needs_validation`` — it is never auto-confirmed without a real
+    adversarial check."""
     system = (
-        "You are an adversarial validator. You did NOT find this issue. Try to disprove it. "
-        "You cannot file findings. State whether the reported boundary failure actually holds."
+        "You are an adversarial validator. You did NOT find this issue and you cannot "
+        "file findings. Try to DISPROVE it: trace a real attacker path to the reported "
+        "boundary failure, and look for a layer that already prevents it. Decide whether "
+        "the boundary failure actually holds against the untouched code.\n\n"
+        "End your reply with exactly one line:\n"
+        "VERDICT: confirmed   (the boundary failure holds and is reachable)\n"
+        "VERDICT: rejected    (disproved, or defended by another layer)\n"
+        "VERDICT: needs_validation (cannot resolve an exact fact)"
     )
     prompt = f"Finding to disprove:\n{finding}"
     resp = ctx.validator.complete(system, prompt)
     if resp.outcome is Outcome.RETRYABLE:
         raise RuntimeError("validator transient failure")
     if resp.text.strip() == "STUB_OK":
-        return False, "stub validator: no adversarial judgment available"
-    disproved = "disproved" in resp.text.lower() or "false positive" in resp.text.lower()
-    return disproved, resp.text[:500]
+        return "needs_validation", "stub validator: no adversarial judgment available"
+
+    verdict = _parse_verdict(resp.text)
+    return verdict, resp.text[:800]
+
+
+def _parse_verdict(text: str) -> str:
+    """Pull the VERDICT line out of the validator's reply; default to open."""
+    for line in reversed(text.splitlines()):
+        low = line.strip().lower()
+        if low.startswith("verdict:"):
+            value = low.split(":", 1)[1].strip()
+            if value in ("confirmed", "rejected", "needs_validation"):
+                return value
+    # No explicit verdict: fall back to conservative keyword reading.
+    low = text.lower()
+    if "false positive" in low or "disproved" in low:
+        return "rejected"
+    return "needs_validation"
 
 
 def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
@@ -78,12 +102,11 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "validate", finding)
         return {"finding_id": finding_id, "verdict": "rejected", "reasons": problems}
 
-    disproved, notes = _pass2_adversarial(ctx, finding)
-    if disproved:
-        finding["verdict"] = "rejected"
-    else:
-        # Cleared Pass 1 but no positive adversarial confirmation => stays open.
-        finding["verdict"] = "needs_validation"
+    verdict, notes = _pass2_adversarial(ctx, finding)
+    finding["verdict"] = verdict
+    if verdict != "confirmed":
+        # Only a confirmed finding keeps a severity; clear any the finder set.
+        finding["severity"] = None
     finding["validation"] = {"checked_by": ctx.validator.name,
                              "disproof_attempted": True, "notes": notes}
     ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "validate", finding)

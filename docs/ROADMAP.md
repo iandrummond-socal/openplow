@@ -18,10 +18,12 @@ Components 1–8, one repo, CLI only.
 - [x] Reporter: REPORT.md + findings.json + SARIF (`stages/report.py`)
 - [x] Sandbox interface: stub + unshare backend (`sandbox.py`)
 - [x] Finding JSON schema (`schemas/finding.schema.json`)
-- [ ] Wire a real finder model and a *different* validator model
-- [ ] Parse real model findings and validate them against the schema
+- [x] Wire a real finder model and a *different* validator model (`models.AnthropicAdapter`, separate `--validator-adapter`)
+- [x] Parse real model findings and validate them against the schema (`findings.py`)
+- [x] Vendor the Cloudflare skill class files into `skills/` and drive hunter prompts from them (`skill_loader.py`)
+- [x] Validator confirms/rejects on an explicit `VERDICT:` line; severity only on confirmed
 - [ ] Harden the unshare sandbox (seccomp, read-only target bind, cgroup caps)
-- [ ] Vendor the Cloudflare skill class files into `skills/`
+- [ ] Have hunters run PoCs in the sandbox against the untouched checkout
 
 ## M2 — Coverage
 Components 9–13 plus an evaluation suite.

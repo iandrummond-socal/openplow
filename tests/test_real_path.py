@@ -1,0 +1,164 @@
+"""Tests for the real (non-stub) hunt/validate path, driven by fake adapters
+that return canned model text. No network, no API key."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from openplow import findings as fmod
+from openplow import skill_loader
+from openplow.context import RunContext
+from openplow.db import Store
+from openplow.models import ModelAdapter, ModelResponse, Outcome
+from openplow.sandbox import StubSandbox
+from openplow.stages import hunt, validate
+
+
+class FakeAdapter(ModelAdapter):
+    """Returns a fixed response, recording the last prompt it saw."""
+
+    def __init__(self, text: str, name: str = "fake", outcome: Outcome = Outcome.OK):
+        self.name = name
+        self._text = text
+        self._outcome = outcome
+        self.last_prompt: str | None = None
+
+    def complete(self, system, prompt, *, max_tokens=4096):
+        self.last_prompt = prompt
+        return ModelResponse(outcome=self._outcome, text=self._text)
+
+
+@pytest.fixture
+def target_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "target"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def handler(req):\n    return eval(req)\n")
+    return repo
+
+
+def _ctx(tmp_path, repo, finder, validator):
+    store = Store(tmp_path / "db.sqlite")
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    (out / "architecture.md").write_text("# Architecture\n")
+    ctx = RunContext(run_id="run-real", repo=repo, out_dir=out, store=store,
+                     finder=finder, validator=validator,
+                     sandbox=StubSandbox(out / "scratch"))
+    ctx.store.create_run("run-real", repo.name, finder.name)
+    return ctx
+
+
+# ---- findings parsing ---------------------------------------------------
+
+def test_extract_json_from_fence():
+    text = 'blah\n```json\n[{"id": "a"}]\n```\ntrailer'
+    assert fmod.extract_json(text) == [{"id": "a"}]
+
+
+def test_extract_json_bare_array():
+    assert fmod.extract_json('[{"id": "a"}, {"id": "b"}]') == [{"id": "a"}, {"id": "b"}]
+
+
+def test_extract_json_findings_wrapper():
+    assert fmod.extract_json('{"findings": [{"id": "a"}]}') == [{"id": "a"}]
+
+
+def test_extract_json_garbage_returns_empty():
+    assert fmod.extract_json("no json here at all") == []
+
+
+def test_validate_finding_catches_missing_fields():
+    problems = fmod.validate_finding({"id": "x"})
+    assert problems  # missing verdict, title, threat_model, etc.
+
+
+def test_validate_finding_accepts_complete():
+    good = {
+        "id": "x", "verdict": "needs_validation", "title": "t",
+        "attack_class": "web-protocol-and-auth",
+        "threat_model": {"attacker": "remote", "boundary": "auth"},
+        "location": {"file": "src/app.py"},
+    }
+    assert fmod.validate_finding(good) == []
+
+
+# ---- skill loader -------------------------------------------------------
+
+def test_skill_is_vendored():
+    assert skill_loader.is_vendored(), "vendored skill missing under skills/security-audit"
+    assert skill_loader.load_class_prompt("web-protocol-and-auth")
+    assert skill_loader.load_class_prompt("no-such-class") is None
+
+
+# ---- hunt with a model that returns a finding ---------------------------
+
+def _finding_json() -> str:
+    finding = {
+        "id": "sqli-1", "verdict": "needs_validation", "title": "eval on request input",
+        "attack_class": "web-protocol-and-auth",
+        "threat_model": {"attacker": "remote unauthenticated", "boundary": "input -> code exec"},
+        "location": {"file": "src/app.py", "line": 2, "symbol": "handler"},
+        "description": "handler passes untrusted input to eval",
+        "poc": {"kind": "input", "content": "__import__('os').system('id')", "observed": "RCE"},
+        "patch": "- return eval(req)\n+ return int(req)",
+    }
+    return "Found one:\n```json\n[" + json.dumps(finding) + "]\n```"
+
+
+def test_hunt_files_valid_finding(tmp_path, target_repo):
+    finder = FakeAdapter(_finding_json(), name="finder-model")
+    ctx = _ctx(tmp_path, target_repo, finder, FakeAdapter("", name="validator-model"))
+    result = hunt.run_task(ctx, {"area": "src", "attack_class": "web-protocol-and-auth"})
+    assert result["findings"] == 1
+    assert result["dropped"] == 0
+    stored = ctx.store.findings("run-real")
+    assert stored[0]["id"] == "sqli-1"
+    assert stored[0]["provenance"]["finder_model"] == "finder-model"
+    # the hunter injected the real class file into the prompt
+    assert "attack" in (finder.last_prompt or "").lower()
+
+
+def test_hunt_drops_malformed_finding(tmp_path, target_repo):
+    finder = FakeAdapter('```json\n[{"id": "bad", "title": "x"}]\n```')
+    ctx = _ctx(tmp_path, target_repo, finder, FakeAdapter(""))
+    result = hunt.run_task(ctx, {"area": "src", "attack_class": "web-protocol-and-auth"})
+    assert result["findings"] == 0
+    assert result["dropped"] == 1
+
+
+def test_hunt_retryable_raises(tmp_path, target_repo):
+    finder = FakeAdapter("overloaded", outcome=Outcome.RETRYABLE)
+    ctx = _ctx(tmp_path, target_repo, finder, FakeAdapter(""))
+    with pytest.raises(RuntimeError):
+        hunt.run_task(ctx, {"area": "src", "attack_class": "web-protocol-and-auth"})
+
+
+# ---- validate confirms / rejects on the VERDICT line --------------------
+
+def _complete_finding() -> dict:
+    return {
+        "id": "sqli-1", "verdict": "needs_validation", "title": "eval on request input",
+        "attack_class": "web-protocol-and-auth",
+        "threat_model": {"attacker": "remote", "boundary": "input -> code exec"},
+        "location": {"file": "src/app.py", "line": 2},
+        "poc": {"kind": "input", "content": "x", "observed": "RCE"},
+    }
+
+
+def test_validate_confirms_on_verdict_line(tmp_path, target_repo):
+    validator = FakeAdapter("Traced it; reachable.\nVERDICT: confirmed", name="validator-model")
+    ctx = _ctx(tmp_path, target_repo, FakeAdapter(""), validator)
+    ctx.store.upsert_finding("run-real", target_repo.name, "hunt", _complete_finding())
+    result = validate.run_task(ctx, {"finding_id": "sqli-1"})
+    assert result["verdict"] == "confirmed"
+
+
+def test_validate_rejects_on_verdict_line(tmp_path, target_repo):
+    validator = FakeAdapter("Defended by a prior check.\nVERDICT: rejected", name="validator-model")
+    ctx = _ctx(tmp_path, target_repo, FakeAdapter(""), validator)
+    ctx.store.upsert_finding("run-real", target_repo.name, "hunt", _complete_finding())
+    result = validate.run_task(ctx, {"finding_id": "sqli-1"})
+    assert result["verdict"] == "rejected"

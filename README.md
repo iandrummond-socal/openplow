@@ -11,10 +11,12 @@ store so a crash loses only the task in flight, a model-agnostic adapter so the
 finder and validator can be different models that check each other, and a
 sandbox for running target code.
 
-> **Status: M1 scaffold.** The pipeline stages run end-to-end against a stub
-> model adapter so the orchestration, persistence, and reporting are exercisable
-> today. Wiring real models and the sandbox is the next step. See
-> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status: M1.** The pipeline runs end-to-end. Hunters build real prompts from
+> the vendored Cloudflare skill class files and the recon context; model output
+> is parsed and schema-checked before storage; the validator confirms or rejects
+> on an explicit verdict. Point it at a real model with `--adapter anthropic:<model-id>`,
+> or use the stub (no API key) to exercise the plumbing. Remaining M1 work is
+> hardening the `unshare` sandbox. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Why a harness and not just the skill
 
@@ -54,6 +56,18 @@ Run the full pipeline against a target repo using the built-in stub adapter
 
 ```bash
 openplow run /path/to/target-repo --adapter stub
+```
+
+Run against a real model (finder and validator should differ so each checks the
+other):
+
+```bash
+export ANTHROPIC_API_KEY=...
+pip install -e '.[anthropic,schema]'
+openplow run /path/to/target-repo \
+  --adapter anthropic:<finder-model-id> \
+  --validator-adapter anthropic:<validator-model-id> \
+  --sandbox unshare
 ```
 
 Results land in `./openplow-runs/<run-id>/` and in the run database. Resume an
