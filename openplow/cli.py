@@ -58,6 +58,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 1 if summary.failed else 0
 
 
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    from .benchmark import load_spec, run_benchmark
+
+    spec = load_spec(args.spec)
+    out_dir = Path(args.out).resolve()
+    print(f"OpenPlow benchmark '{spec.name}'  targets={len(spec.targets)}  "
+          f"finder={args.adapter}  validator={args.validator_adapter or args.adapter}")
+    report = run_benchmark(spec, finder_spec=args.adapter,
+                           validator_spec=args.validator_adapter,
+                           sandbox_kind=args.sandbox, out_dir=out_dir)
+    t = report.totals
+    print(f"recall={t['recall']:.0%} confirmed_recall={t['confirmed_recall']:.0%} "
+          f"rejection_rate={t['rejection_rate']:.0%} "
+          f"unmatched_confirmed={t['unmatched_confirmed']}")
+    print(f"report: {out_dir / 'benchmark-report.md'}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     store = _store()
     run = store.get_run(args.run_id)
@@ -93,6 +111,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--resume", default=None, metavar="RUN_ID",
                      help="resume an interrupted run")
     run.set_defaults(func=cmd_run)
+
+    bm = sub.add_parser("benchmark", help="run the pipeline over a benchmark spec and score it")
+    bm.add_argument("spec", help="path to a benchmark spec JSON")
+    bm.add_argument("--adapter", default="stub", help="finder model adapter")
+    bm.add_argument("--validator-adapter", default=None, help="validator adapter")
+    bm.add_argument("--sandbox", default="stub", choices=["stub", "unshare"])
+    bm.add_argument("--out", default="openplow-benchmarks", help="output directory")
+    bm.set_defaults(func=cmd_benchmark)
 
     st = sub.add_parser("status", help="show a run's state")
     st.add_argument("run_id")

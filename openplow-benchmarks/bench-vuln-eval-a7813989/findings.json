@@ -1,0 +1,89 @@
+[
+  {
+    "id": "eval-rce",
+    "verdict": "needs_validation",
+    "title": "Remote code execution via eval() on request input",
+    "attack_class": "web-protocol-and-auth",
+    "severity": "critical",
+    "threat_model": {
+      "attacker": "remote unauthenticated client controlling the request body",
+      "boundary": "untrusted input crosses into the Python interpreter"
+    },
+    "location": {
+      "file": "src/app.py",
+      "line": 5,
+      "symbol": "handler"
+    },
+    "description": "handler() passes the raw request to eval(), so any client can execute arbitrary Python.",
+    "poc": {
+      "kind": "script",
+      "content": "import importlib.util\ns = importlib.util.spec_from_file_location('app', 'src/app.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nprint('PWNED', m.handler('6*7'))\n",
+      "observed": "PWNED"
+    },
+    "patch": "-    return eval(req)\n+    return int(req)",
+    "provenance": {
+      "run_id": "bench-vuln-eval-a7813989",
+      "repo": "vuln-eval",
+      "stage": "hunt",
+      "finder_model": "fixture",
+      "task_id": "hunt:src:web-protocol-and-auth"
+    }
+  },
+  {
+    "id": "bogus-timing",
+    "verdict": "needs_validation",
+    "title": "Alleged timing side-channel in handler",
+    "attack_class": "web-protocol-and-auth",
+    "threat_model": {
+      "attacker": "remote client measuring response time",
+      "boundary": "timing reveals a secret"
+    },
+    "location": {
+      "file": "src/app.py",
+      "line": 4,
+      "symbol": "handler"
+    },
+    "description": "Speculative finding with no real primitive; its PoC does not reproduce.",
+    "poc": {
+      "kind": "script",
+      "content": "import sys; sys.exit(1)\n"
+    },
+    "provenance": {
+      "run_id": "bench-vuln-eval-a7813989",
+      "repo": "vuln-eval",
+      "stage": "hunt",
+      "finder_model": "fixture",
+      "task_id": "hunt:src:web-protocol-and-auth"
+    }
+  },
+  {
+    "id": "path-traversal",
+    "verdict": "needs_validation",
+    "title": "Path traversal in read_file()",
+    "attack_class": "data-isolation-and-lifecycle",
+    "severity": "high",
+    "threat_model": {
+      "attacker": "client controlling the file name",
+      "boundary": "a crafted name escapes the BASE directory"
+    },
+    "location": {
+      "file": "src/files.py",
+      "line": 9,
+      "symbol": "read_file"
+    },
+    "description": "read_file() joins the base dir with an unsanitised name, so '../../etc/passwd' escapes BASE.",
+    "poc": {
+      "kind": "script",
+      "content": "import importlib.util, os\ns = importlib.util.spec_from_file_location('files', 'src/files.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nreal = os.path.normpath(os.path.join(m.BASE, '../../etc/passwd'))\nassert not real.startswith(m.BASE), real\nprint('TRAVERSAL', real)\n",
+      "observed": "TRAVERSAL"
+    },
+    "patch": "-    path = os.path.join(BASE, name)\n+    path = os.path.join(BASE, name)\n+    if not os.path.realpath(path).startswith(os.path.realpath(BASE)):\n+        raise ValueError('path traversal')",
+    "provenance": {
+      "run_id": "bench-vuln-eval-a7813989",
+      "repo": "vuln-eval",
+      "stage": "hunt",
+      "finder_model": "fixture",
+      "task_id": "hunt:src:data-isolation-and-lifecycle"
+    }
+  }
+]

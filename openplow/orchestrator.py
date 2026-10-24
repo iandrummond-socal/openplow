@@ -50,7 +50,7 @@ def drain(ctx: RunContext, *, sleep=time.sleep) -> RunSummary:
             break
         try:
             _run_one(ctx, task)
-            ctx.store.finish_task(task.task_id, "done")
+            ctx.store.finish_task(task.run_id, task.task_id, "done")
             processed += 1
             if task.stage == "report":
                 final = {"ok": True}
@@ -59,9 +59,9 @@ def drain(ctx: RunContext, *, sleep=time.sleep) -> RunSummary:
             if task.attempts < MAX_ATTEMPTS:
                 # Transient: back off and requeue by marking pending again.
                 sleep(BACKOFF_BASE ** task.attempts)
-                ctx.store.finish_task(task.task_id, "pending", error=str(exc))
+                ctx.store.finish_task(task.run_id, task.task_id, "pending", error=str(exc))
             else:
-                ctx.store.finish_task(task.task_id, "failed", error=err)
+                ctx.store.finish_task(task.run_id, task.task_id, "failed", error=err)
                 failed += 1
 
     ctx.store.set_run_status(ctx.run_id, "failed" if failed else "done")

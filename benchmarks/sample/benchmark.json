@@ -1,0 +1,31 @@
+{
+  "name": "openplow-sample",
+  "targets": [
+    {
+      "name": "vuln-eval",
+      "path": "targets/vuln-eval",
+      "expected": [
+        {
+          "id": "eval-rce",
+          "file": "src/app.py",
+          "attack_class": "web-protocol-and-auth",
+          "symbol": "handler",
+          "line_range": [1, 6]
+        }
+      ]
+    },
+    {
+      "name": "vuln-path",
+      "path": "targets/vuln-path",
+      "expected": [
+        {
+          "id": "path-traversal",
+          "file": "src/files.py",
+          "attack_class": "data-isolation-and-lifecycle",
+          "symbol": "read_file",
+          "line_range": [1, 12]
+        }
+      ]
+    }
+  ]
+}

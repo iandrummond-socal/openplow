@@ -1,0 +1,52 @@
+[
+  {
+    "area": "src",
+    "attack_class": "web-protocol-and-auth",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "memory-safety-and-binary",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "ai-and-llm",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "client-side",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "supply-chain-and-release",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "cloud-and-deployment",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "protocols-rpc-and-messaging",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "resource-exhaustion-and-availability",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "data-isolation-and-lifecycle",
+    "status": "pending"
+  },
+  {
+    "area": "src",
+    "attack_class": "desktop-mobile-and-local-ipc",
+    "status": "pending"
+  }
+]

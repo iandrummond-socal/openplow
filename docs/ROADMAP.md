@@ -35,7 +35,9 @@ Components 9–13 plus an evaluation suite.
 - [ ] Streaming producer/consumer across gapfill/validate/dedup/report
 - [ ] Wishlist surfaced as a report section and a build-priority signal (store table exists)
 - [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
-- [ ] Benchmark harness over known-CVE repos; track validation rejection rate
+- [x] Benchmark harness over known-vuln repos; recall + rejection rate (`benchmark.py`, `benchmarks/`)
+- [x] `fixture` adapter for deterministic, no-API-key benchmark/scoring runs
+- [x] Fix: task identity scoped to `(run_id, task_id)` so several runs share one DB (surfaced by the benchmark)
 
 ## M3 — Fleet
 Components 14–17.

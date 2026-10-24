@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "OpenPlow",
+          "informationUri": "https://github.com/iandrummond-socal/OpenPlow",
+          "rules": []
+        }
+      },
+      "results": [
+        {
+          "ruleId": "web-protocol-and-auth",
+          "level": "error",
+          "message": {
+            "text": "Remote code execution via eval() on request input"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/app.py"
+                },
+                "region": {
+                  "startLine": 5
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "web-protocol-and-auth",
+          "level": "warning",
+          "message": {
+            "text": "Alleged timing side-channel in handler"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/app.py"
+                },
+                "region": {
+                  "startLine": 4
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "data-isolation-and-lifecycle",
+          "level": "error",
+          "message": {
+            "text": "Path traversal in read_file()"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/files.py"
+                },
+                "region": {
+                  "startLine": 9
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

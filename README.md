@@ -87,6 +87,20 @@ openplow status <run-id>
 openplow findings <run-id>
 ```
 
+## Benchmark
+
+Measure OpenPlow against targets with known vulnerabilities — recall, confirmed
+recall, and the validation rejection rate. The sample runs deterministically
+with no API key via the `fixture` adapter:
+
+```bash
+openplow benchmark benchmarks/sample/benchmark.json \
+  --adapter fixture:benchmarks/sample/fixture.json
+```
+
+Swap in `--adapter anthropic:<finder-id> --validator-adapter anthropic:<validator-id>`
+to score a real model. See [`benchmarks/README.md`](benchmarks/README.md).
+
 ## Layout
 
 | Path | What it is |
@@ -97,8 +111,10 @@ openplow findings <run-id>
 | `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps (stub + unshare) |
 | `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects source tampering |
 | `openplow/stages/` | `recon`, `hunt`, `validate`, `report` |
+| `openplow/benchmark.py` | Runs the pipeline over known-vuln targets and scores recall + noise |
 | `openplow/schemas/` | Finding JSON schema |
 | `skills/` | Vendored Cloudflare `security-audit` skill (see `skills/README.md`) |
+| `benchmarks/` | Benchmark specs + sample known-vuln targets (see `benchmarks/README.md`) |
 
 ## License
 

@@ -130,6 +130,52 @@ class AnthropicAdapter(ModelAdapter):
             return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc))
 
 
+class FixtureAdapter(ModelAdapter):
+    """Deterministic adapter that replays canned findings from a fixture file.
+
+    Lets the benchmark harness (and tests) run the whole pipeline — including
+    scoring — without a network or an API key. The fixture is::
+
+        {
+          "hunts": {"<area>/<attack_class>": [ <finding>, ... ], ...},
+          "validator_verdict": "confirmed"      # applied to every validation
+        }
+
+    The adapter tells a hunt call from a validation call by the prompt: a
+    validation prompt starts with "Finding to disprove".
+    """
+
+    name = "fixture"
+
+    def __init__(self, fixture: dict[str, Any], *, name: str = "fixture"):
+        self.name = name
+        self._hunts: dict[str, list] = fixture.get("hunts", {})
+        self._verdict: str = fixture.get("validator_verdict", "confirmed")
+
+    @classmethod
+    def from_path(cls, path: str, **kw: Any) -> FixtureAdapter:
+        import json
+        from pathlib import Path
+        return cls(json.loads(Path(path).read_text(encoding="utf-8")), **kw)
+
+    def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
+        if prompt.lstrip().startswith("Finding to disprove"):
+            return ModelResponse(outcome=Outcome.OK, text=f"VERDICT: {self._verdict}")
+        area = _grep(prompt, "Area:")
+        attack_class = _grep(prompt, "Attack class:")
+        findings = self._hunts.get(f"{area}/{attack_class}", [])
+        import json
+        return ModelResponse(outcome=Outcome.OK,
+                             text="```json\n" + json.dumps(findings) + "\n```")
+
+
+def _grep(text: str, label: str) -> str:
+    for line in text.splitlines():
+        if line.strip().startswith(label):
+            return line.split(label, 1)[1].strip()
+    return ""
+
+
 def _classify_exception(exc: Exception) -> Outcome:
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
@@ -154,4 +200,6 @@ def build_adapter(spec: str, **kwargs: Any) -> ModelAdapter:
         return _BUILTIN[spec](**kwargs)
     if spec.startswith("anthropic:"):
         return AnthropicAdapter(model=spec.split(":", 1)[1], **kwargs)
+    if spec.startswith("fixture:"):
+        return FixtureAdapter.from_path(spec.split(":", 1)[1], **kwargs)
     raise ValueError(f"unknown adapter spec: {spec!r}")

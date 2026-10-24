@@ -29,8 +29,10 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 -- One row per unit of work. The orchestrator is a queue over this table.
+-- task_id is unique WITHIN a run, not globally, so task ids may repeat across
+-- runs (e.g. several benchmark targets sharing one database).
 CREATE TABLE IF NOT EXISTS tasks (
-    task_id     TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
     run_id      TEXT NOT NULL,
     repo        TEXT NOT NULL,
     stage       TEXT NOT NULL,
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     error       TEXT,
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL,
+    PRIMARY KEY (run_id, task_id),
     UNIQUE (run_id, repo, stage, payload)
 );
 
@@ -164,8 +167,8 @@ class Store:
                 return None
             c.execute(
                 "UPDATE tasks SET status = 'running', attempts = attempts + 1, updated_at = ? "
-                "WHERE task_id = ?",
-                (_now(), row["task_id"]),
+                "WHERE run_id = ? AND task_id = ?",
+                (_now(), run_id, row["task_id"]),
             )
             return Task(
                 task_id=row["task_id"], run_id=row["run_id"], repo=row["repo"],
@@ -173,11 +176,13 @@ class Store:
                 status="running", attempts=row["attempts"] + 1, error=None,
             )
 
-    def finish_task(self, task_id: str, status: str, error: str | None = None) -> None:
+    def finish_task(self, run_id: str, task_id: str, status: str,
+                    error: str | None = None) -> None:
         with self._tx() as c:
             c.execute(
-                "UPDATE tasks SET status = ?, error = ?, updated_at = ? WHERE task_id = ?",
-                (status, error, _now(), task_id),
+                "UPDATE tasks SET status = ?, error = ?, updated_at = ? "
+                "WHERE run_id = ? AND task_id = ?",
+                (status, error, _now(), run_id, task_id),
             )
 
     def requeue_stale_running(self, run_id: str) -> int:
