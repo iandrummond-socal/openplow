@@ -38,8 +38,11 @@ Recon  →  Hunt  →  Validate  →  Report
 ```
 
 Each finding must carry a threat model, a proof-of-concept test that runs
-against the **untouched** code, and a proposed patch. The validator is a fresh
-agent that tries to disprove the finding and can never file one itself.
+against the **untouched** code, and a proposed patch. The validator runs the PoC
+in the sandbox against a pristine copy of the target — reproduction is the
+confirmation gate, and a PoC that edits source to "work" is rejected as tampered
+— then a fresh agent (a different model) tries to disprove the finding. The
+validator can never file one itself.
 
 ## Install
 
@@ -91,7 +94,8 @@ openplow findings <run-id>
 | `openplow/orchestrator.py` | Splits a run into tasks; drives stages; retries and resumes |
 | `openplow/db.py` | SQLite state store keyed by `(run_id, repo, stage)` |
 | `openplow/models.py` | Model-adapter interface + stub adapter |
-| `openplow/sandbox.py` | OS-enforced sandbox for running target code (stub + unshare) |
+| `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps (stub + unshare) |
+| `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects source tampering |
 | `openplow/stages/` | `recon`, `hunt`, `validate`, `report` |
 | `openplow/schemas/` | Finding JSON schema |
 | `skills/` | Vendored Cloudflare `security-audit` skill (see `skills/README.md`) |

@@ -22,8 +22,10 @@ Components 1–8, one repo, CLI only.
 - [x] Parse real model findings and validate them against the schema (`findings.py`)
 - [x] Vendor the Cloudflare skill class files into `skills/` and drive hunter prompts from them (`skill_loader.py`)
 - [x] Validator confirms/rejects on an explicit `VERDICT:` line; severity only on confirmed
-- [ ] Harden the unshare sandbox (seccomp, read-only target bind, cgroup caps)
-- [ ] Have hunters run PoCs in the sandbox against the untouched checkout
+- [x] Harden the sandbox: cleaned env, net isolation (`unshare --net`), rlimit caps — cpu, file size, procs, optional address space (`sandbox.py`)
+- [x] Run PoCs against a pristine copy with source-integrity (tamper) detection (`poc.py`); reproduction is the confirmation gate
+- [ ] Sandbox: seccomp profile, read-only bind of the target, cgroup-v2 memory cap
+- [ ] Fail→pass patch gate (run PoC, apply the finding's patch, confirm it no longer reproduces)
 
 ## M2 — Coverage
 Components 9–13 plus an evaluation suite.

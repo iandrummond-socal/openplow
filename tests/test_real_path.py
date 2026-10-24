@@ -162,3 +162,72 @@ def test_validate_rejects_on_verdict_line(tmp_path, target_repo):
     ctx.store.upsert_finding("run-real", target_repo.name, "hunt", _complete_finding())
     result = validate.run_task(ctx, {"finding_id": "sqli-1"})
     assert result["verdict"] == "rejected"
+
+
+# ---- PoC execution against a pristine copy ------------------------------
+
+from openplow import poc as poc_mod
+from openplow.sandbox import Limits
+
+
+def _sandbox(tmp_path) -> StubSandbox:
+    return StubSandbox(tmp_path / "sb", timeout=10, limits=Limits(cpu_seconds=10))
+
+
+def test_poc_demonstrated(tmp_path, target_repo):
+    finding = {
+        "poc": {"kind": "script", "content": "print('PWNED')\n", "observed": "PWNED"}
+    }
+    run = poc_mod.run_poc(_sandbox(tmp_path), target_repo, finding, tmp_path / "w")
+    assert run.attempted and run.demonstrated and run.integrity_ok
+
+
+def test_poc_not_reproduced(tmp_path, target_repo):
+    finding = {"poc": {"kind": "script", "content": "import sys; sys.exit(1)\n"}}
+    run = poc_mod.run_poc(_sandbox(tmp_path), target_repo, finding, tmp_path / "w")
+    assert run.attempted and not run.demonstrated
+
+
+def test_poc_tampering_detected(tmp_path, target_repo):
+    # A PoC that edits a pre-existing source file must be flagged, even on exit 0.
+    finding = {"poc": {"kind": "script",
+                       "content": "open('src/app.py', 'w').write('tampered')\n"}}
+    run = poc_mod.run_poc(_sandbox(tmp_path), target_repo, finding, tmp_path / "w")
+    assert run.attempted and not run.integrity_ok and not run.demonstrated
+
+
+def test_poc_input_kind_not_executed(tmp_path, target_repo):
+    finding = {"poc": {"kind": "input", "content": "x"}}
+    run = poc_mod.run_poc(_sandbox(tmp_path), target_repo, finding, tmp_path / "w")
+    assert not run.attempted
+
+
+def test_original_repo_untouched_by_poc(tmp_path, target_repo):
+    before = (target_repo / "src" / "app.py").read_text()
+    finding = {"poc": {"kind": "script",
+                       "content": "open('src/app.py', 'w').write('x')\n"}}
+    poc_mod.run_poc(_sandbox(tmp_path), target_repo, finding, tmp_path / "w")
+    # PoC ran on a copy; the real target is unchanged.
+    assert (target_repo / "src" / "app.py").read_text() == before
+
+
+def test_validate_confirms_when_poc_reproduces(tmp_path, target_repo):
+    validator = FakeAdapter("reachable\nVERDICT: confirmed", name="validator-model")
+    ctx = _ctx(tmp_path, target_repo, FakeAdapter(""), validator)
+    finding = _complete_finding()
+    finding["poc"] = {"kind": "script", "content": "print('ok')\n", "observed": "ok"}
+    ctx.store.upsert_finding("run-real", target_repo.name, "hunt", finding)
+    result = validate.run_task(ctx, {"finding_id": "sqli-1"})
+    assert result["verdict"] == "confirmed"
+    assert result["poc_demonstrated"] is True
+
+
+def test_validate_rejects_when_poc_tampers(tmp_path, target_repo):
+    validator = FakeAdapter("VERDICT: confirmed", name="validator-model")
+    ctx = _ctx(tmp_path, target_repo, FakeAdapter(""), validator)
+    finding = _complete_finding()
+    finding["poc"] = {"kind": "script",
+                      "content": "open('src/app.py','w').write('x')\n"}
+    ctx.store.upsert_finding("run-real", target_repo.name, "hunt", finding)
+    result = validate.run_task(ctx, {"finding_id": "sqli-1"})
+    assert result["verdict"] == "rejected"

@@ -1,22 +1,26 @@
 """Phase 3 — Validation.
 
-Two passes, and the validator can never file a finding itself:
+Three checks, and the validator can never file a finding itself:
 
 * **Pass 1, deterministic.** The cited file exists; the finding has a threat
-  model; a PoC is present; the patch (if any) is a plausible diff. A failure
-  here rejects the finding without spending a model.
+  model; a PoC is present. A failure here rejects the finding without spending a
+  model or the sandbox.
+* **PoC execution.** The PoC runs in the sandbox against a pristine copy of the
+  target (``openplow.poc``). Reproduction against untouched code is the ground
+  truth; a PoC that tampers with source is rejected outright.
 * **Pass 2, adversarial.** A *fresh, isolated* agent — a different model from the
-  finder — tries to disprove the finding. If it cannot, and the deterministic
-  checks pass, the finding is confirmed; otherwise it stays needs_validation or
-  is rejected.
+  finder — tries to disprove the finding and returns an explicit verdict.
 
-The scaffold runs Pass 1 fully (it is pure code) and stubs Pass 2.
+The verdict combines them: a tampering PoC or one that fails to reproduce is
+rejected; an executed PoC that reproduces is confirmed unless the adversarial
+model disproves it; a non-executable PoC falls back to the model verdict.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .. import poc as poc_mod
 from ..context import RunContext
 from ..models import Outcome
 
@@ -102,12 +106,42 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "validate", finding)
         return {"finding_id": finding_id, "verdict": "rejected", "reasons": problems}
 
+    # PoC execution against a pristine copy — the ground-truth check.
+    run = poc_mod.run_poc(ctx.sandbox, ctx.repo, finding,
+                          ctx.out_dir / "scratch" / finding_id)
+
+    if run.attempted and not run.integrity_ok:
+        return _reject(ctx, finding, finding_id, f"poc-execution: {run.reason}", run)
+    if run.attempted and not run.demonstrated:
+        return _reject(ctx, finding, finding_id, f"poc-execution: {run.reason}", run)
+
+    # Adversarial model pass (can disprove even an executed PoC).
     verdict, notes = _pass2_adversarial(ctx, finding)
+
+    if run.attempted and run.demonstrated:
+        # Reproduced against untouched code. Confirm unless the model disproved it.
+        verdict = "rejected" if verdict == "rejected" else "confirmed"
+
     finding["verdict"] = verdict
     if verdict != "confirmed":
         # Only a confirmed finding keeps a severity; clear any the finder set.
         finding["severity"] = None
-    finding["validation"] = {"checked_by": ctx.validator.name,
-                             "disproof_attempted": True, "notes": notes}
+    finding["validation"] = {
+        "checked_by": ctx.validator.name, "disproof_attempted": True, "notes": notes,
+        "poc_attempted": run.attempted, "poc_demonstrated": run.demonstrated,
+        "poc_reason": run.reason,
+    }
     ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "validate", finding)
-    return {"finding_id": finding_id, "verdict": finding["verdict"]}
+    return {"finding_id": finding_id, "verdict": finding["verdict"],
+            "poc_demonstrated": run.demonstrated}
+
+
+def _reject(ctx: RunContext, finding: dict[str, Any], finding_id: str,
+            reason: str, run: poc_mod.PocRun) -> dict[str, Any]:
+    finding["verdict"] = "rejected"
+    finding["severity"] = None
+    finding["validation"] = {"checked_by": "poc-execution", "disproof_attempted": True,
+                             "notes": reason, "poc_attempted": run.attempted,
+                             "poc_demonstrated": run.demonstrated}
+    ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "validate", finding)
+    return {"finding_id": finding_id, "verdict": "rejected", "reasons": [reason]}
