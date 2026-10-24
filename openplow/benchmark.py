@@ -125,7 +125,14 @@ class TargetScore:
     rejection_rate: float
 
 
+def _is_duplicate(f: dict[str, Any]) -> bool:
+    d = f.get("dedup")
+    return bool(d) and not d.get("canonical", True)
+
+
 def score_target(spec: TargetSpec, findings: list[dict[str, Any]]) -> TargetScore:
+    # Fold duplicates so a cluster counts once.
+    findings = [f for f in findings if not _is_duplicate(f)]
     confirmed = [f for f in findings if f.get("verdict") == "confirmed"]
     non_rejected = [f for f in findings if f.get("verdict") != "rejected"]
     rejected = [f for f in findings if f.get("verdict") == "rejected"]

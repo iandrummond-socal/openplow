@@ -94,7 +94,6 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         if ctx.store.add_task(task_id, ctx.run_id, ctx.repo_name, "hunt", payload=cell):
             enqueued += 1
 
-    # A report task closes the run once hunting and validation drain.
-    ctx.store.add_task("report:final", ctx.run_id, ctx.repo_name, "report", payload={})
-
+    # Report runs as a finalization step in the orchestrator, after the queue
+    # drains, so it always sees the full validated finding set.
     return {"areas": len(areas), "cells": len(ledger), "hunts_enqueued": enqueued}

@@ -42,11 +42,20 @@ def _to_sarif(ctx: RunContext, findings: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+def _is_duplicate(f: dict[str, Any]) -> bool:
+    d = f.get("dedup")
+    return bool(d) and not d.get("canonical", True)
+
+
 def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     all_findings = ctx.store.findings(ctx.run_id)
-    confirmed = [f for f in all_findings if f.get("verdict") == "confirmed"]
-    needs = [f for f in all_findings if f.get("verdict") == "needs_validation"]
-    rejected = [f for f in all_findings if f.get("verdict") == "rejected"]
+    # Fold duplicates: the report counts one canonical finding per cluster.
+    distinct = [f for f in all_findings if not _is_duplicate(f)]
+    folded = len(all_findings) - len(distinct)
+
+    confirmed = [f for f in distinct if f.get("verdict") == "confirmed"]
+    needs = [f for f in distinct if f.get("verdict") == "needs_validation"]
+    rejected = [f for f in distinct if f.get("verdict") == "rejected"]
 
     (ctx.out_dir / "findings.json").write_text(json.dumps(all_findings, indent=2) + "\n")
     (ctx.out_dir / "openplow.sarif").write_text(
@@ -63,6 +72,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         f"- Confirmed: {len(confirmed)}",
         f"- Needs validation: {len(needs)}",
         f"- Rejected: {len(rejected)}",
+        f"- Duplicates folded: {folded}",
         "",
     ]
     if confirmed:
@@ -84,4 +94,5 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     (ctx.out_dir / "REPORT.md").write_text("\n".join(lines) + "\n")
 
     return {"confirmed": len(confirmed), "needs_validation": len(needs),
-            "rejected": len(rejected), "out_dir": str(ctx.out_dir)}
+            "rejected": len(rejected), "duplicates_folded": folded,
+            "out_dir": str(ctx.out_dir)}

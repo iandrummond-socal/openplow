@@ -30,12 +30,16 @@ a real bottleneck.
 ## Pipeline
 
 ```
-Recon  →  Hunt  →  Validate  →  Report
- map      break     adversarial   findings
- +        the       + PoC         + SARIF
- threat   code
+Recon  →  Hunt  →  Validate  →  Gapfill  →  Dedup  →  Report
+ map      break     adversarial   re-queue    fold      findings
+ +        the       + PoC         thin cells  by root   + SARIF
+ threat   code                    (bounded)   cause
  model
 ```
+
+Recon, hunt, and validate run through the task queue. Gapfill, dedup, and report
+run as finalization after the queue drains, so the report always reflects the
+full, validated set (late finds included).
 
 Each finding must carry a threat model, a proof-of-concept test that runs
 against the **untouched** code, and a proposed patch. The validator runs the PoC
@@ -110,7 +114,7 @@ to score a real model. See [`benchmarks/README.md`](benchmarks/README.md).
 | `openplow/models.py` | Model-adapter interface + stub adapter |
 | `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps (stub + unshare) |
 | `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects source tampering |
-| `openplow/stages/` | `recon`, `hunt`, `validate`, `report` |
+| `openplow/stages/` | `recon`, `hunt`, `validate`, `gapfill`, `dedup`, `report` |
 | `openplow/benchmark.py` | Runs the pipeline over known-vuln targets and scores recall + noise |
 | `openplow/schemas/` | Finding JSON schema |
 | `skills/` | Vendored Cloudflare `security-audit` skill (see `skills/README.md`) |

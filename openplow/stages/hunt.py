@@ -64,7 +64,8 @@ def _area_files(repo: Path, area: str) -> list[str]:
     return out
 
 
-def _build_prompt(ctx: RunContext, area: str, attack_class: str) -> tuple[str, str]:
+def _build_prompt(ctx: RunContext, area: str, attack_class: str,
+                  depth: int = 1) -> tuple[str, str]:
     """Assemble (system, prompt) for a hunter from the skill + recon context."""
     class_prompt = skill_loader.load_class_prompt(attack_class)
     if class_prompt is None:
@@ -83,6 +84,12 @@ def _build_prompt(ctx: RunContext, area: str, attack_class: str) -> tuple[str, s
         f"# Attack-class methodology\n{class_prompt[:_CLASS_PROMPT_CHARS]}\n\n"
         "Hunt this area for the attack class above. Return a JSON array of findings."
     )
+    if depth > 1:
+        prompt += (
+            f"\n\nThis is gapfill pass {depth}: a previous hunt of this cell found "
+            "nothing. Look harder and from a different angle — chained or multi-step "
+            "paths, edge cases, and assumptions the obvious review would skip."
+        )
     return _SYSTEM, prompt
 
 
@@ -95,8 +102,9 @@ def _parse_findings(text: str) -> list[dict[str, Any]]:
 def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     area = payload.get("area", "(root)")
     attack_class = payload.get("attack_class", "unknown")
+    depth = int(payload.get("depth", 1))
 
-    system, prompt = _build_prompt(ctx, area, attack_class)
+    system, prompt = _build_prompt(ctx, area, attack_class, depth)
     resp = ctx.finder.complete(system, prompt, max_tokens=8192)
 
     if resp.outcome is Outcome.RETRYABLE:
@@ -108,10 +116,17 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         return {"area": area, "attack_class": attack_class, "findings": 0, "fatal": True}
 
     parsed = _parse_findings(resp.text)
+    existing_ids = {f["id"] for f in ctx.store.findings(ctx.run_id)}
     filed = 0
     dropped = 0
+    skipped = 0
     for i, finding in enumerate(parsed):
         finding.setdefault("id", f"{area}:{attack_class}:{i}")
+        # First report of an id wins: a later (e.g. gapfill) pass must not
+        # overwrite an already-stored/validated finding back to needs_validation.
+        if finding["id"] in existing_ids:
+            skipped += 1
+            continue
         finding["verdict"] = "needs_validation"
         finding.setdefault("attack_class", attack_class)
         finding["provenance"] = {
@@ -130,4 +145,5 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
                            "validate", payload={"finding_id": finding["id"]})
         filed += 1
 
-    return {"area": area, "attack_class": attack_class, "findings": filed, "dropped": dropped}
+    return {"area": area, "attack_class": attack_class, "findings": filed,
+            "dropped": dropped, "skipped": skipped}

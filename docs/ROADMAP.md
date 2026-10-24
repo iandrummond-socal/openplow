@@ -30,14 +30,16 @@ Components 1–8, one repo, CLI only.
 ## M2 — Coverage
 Components 9–13 plus an evaluation suite.
 
-- [ ] Gapfill: re-queue thin `(area x class)` cells and zero-finding hunts
-- [ ] Dedup: inverted indexes + root-cause clustering, stable cross-run keys
-- [ ] Streaming producer/consumer across gapfill/validate/dedup/report
-- [ ] Wishlist surfaced as a report section and a build-priority signal (store table exists)
-- [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
+- [x] Gapfill: re-queue thin `(area x class)` cells (deeper passes), bounded rounds (`stages/gapfill.py`)
+- [x] Dedup: root-cause key from inverted indexes (file, symbol, class, boundary); stable cross-run key; marks canonical vs duplicate (`stages/dedup.py`)
+- [x] Finalization ordering: gapfill → dedup → report run after the queue drains, so the report sees the full validated set
+- [x] Wishlist surfaced as a report section (store table + report wired)
 - [x] Benchmark harness over known-vuln repos; recall + rejection rate (`benchmark.py`, `benchmarks/`)
 - [x] `fixture` adapter for deterministic, no-API-key benchmark/scoring runs
 - [x] Fix: task identity scoped to `(run_id, task_id)` so several runs share one DB (surfaced by the benchmark)
+- [x] Fix: a re-hunt no longer resets an already-stored finding (first report of an id wins)
+- [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
+- [ ] More gapfill rounds driven by a coverage metric rather than a fixed cap
 
 ## M3 — Fleet
 Components 14–17.
