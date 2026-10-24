@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/iandrummond-socal/OpenPlow/schemas/finding.schema.json",
+  "title": "OpenPlow finding",
+  "description": "A single candidate vulnerability produced by a hunter and judged by the validator. Adapted from the Cloudflare security-audit skill's report schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "verdict", "title", "attack_class", "threat_model", "location"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable cross-run key for this finding (root-cause based, not line based)."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["confirmed", "needs_validation", "rejected"],
+      "description": "confirmed = complete source trace + bounded observed result; needs_validation = exact unresolved fact, no severity; rejected = disproved."
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "attack_class": {
+      "type": "string",
+      "description": "One of the attack classes from the skill's class files (e.g. web-auth, memory-safety, llm, supply-chain)."
+    },
+    "severity": {
+      "type": ["string", "null"],
+      "enum": ["critical", "high", "medium", "low", "info", null],
+      "description": "Impact = likelihood x impact. Null unless verdict is confirmed."
+    },
+    "threat_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attacker", "boundary"],
+      "properties": {
+        "attacker": { "type": "string", "description": "Who the attacker is and what they control." },
+        "boundary": { "type": "string", "description": "The trust boundary crossed." }
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file"],
+      "properties": {
+        "file": { "type": "string", "description": "Repo-relative path, must exist." },
+        "line": { "type": ["integer", "null"], "minimum": 1 },
+        "symbol": { "type": ["string", "null"] }
+      }
+    },
+    "description": { "type": "string" },
+    "poc": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "A proof of concept that runs against the UNTOUCHED codebase. Absent/failing PoC => finding is treated as fake.",
+      "properties": {
+        "kind": { "type": "string", "enum": ["test", "script", "input", "trace"] },
+        "path": { "type": ["string", "null"] },
+        "content": { "type": ["string", "null"] },
+        "observed": { "type": ["string", "null"], "description": "The bounded result observed when run." }
+      }
+    },
+    "patch": {
+      "type": ["string", "null"],
+      "description": "Proposed git diff that fixes the finding."
+    },
+    "validation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Filled by the adversarial validator; never by the finder.",
+      "properties": {
+        "checked_by": { "type": "string" },
+        "disproof_attempted": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "repo", "stage"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "repo": { "type": "string" },
+        "stage": { "type": "string" },
+        "finder_model": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

@@ -1,0 +1,87 @@
+"""Phase 6 — Reporting.
+
+A plain script, no model. It reads the verified records from the store and
+writes human- and machine-readable output: REPORT.md, findings.json, and a
+SARIF file so results can be surfaced in GitHub code scanning.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from ..context import RunContext
+
+_SARIF_LEVEL = {"critical": "error", "high": "error", "medium": "warning",
+                "low": "note", "info": "note", None: "warning"}
+
+
+def _to_sarif(ctx: RunContext, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    results = []
+    for f in findings:
+        loc = f.get("location") or {}
+        results.append({
+            "ruleId": f.get("attack_class", "unknown"),
+            "level": _SARIF_LEVEL.get(f.get("severity")),
+            "message": {"text": f.get("title", f.get("id", "finding"))},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": loc.get("file", "")},
+                    "region": {"startLine": loc.get("line") or 1},
+                }
+            }],
+        })
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {"name": "OpenPlow", "informationUri":
+                     "https://github.com/iandrummond-socal/OpenPlow", "rules": []}},
+            "results": results,
+        }],
+    }
+
+
+def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
+    all_findings = ctx.store.findings(ctx.run_id)
+    confirmed = [f for f in all_findings if f.get("verdict") == "confirmed"]
+    needs = [f for f in all_findings if f.get("verdict") == "needs_validation"]
+    rejected = [f for f in all_findings if f.get("verdict") == "rejected"]
+
+    (ctx.out_dir / "findings.json").write_text(json.dumps(all_findings, indent=2) + "\n")
+    (ctx.out_dir / "openplow.sarif").write_text(
+        json.dumps(_to_sarif(ctx, confirmed + needs), indent=2) + "\n")
+
+    lines = [
+        f"# OpenPlow report — {ctx.repo_name}",
+        "",
+        f"- Run: `{ctx.run_id}`",
+        f"- Finder model: `{ctx.finder.name}`  ·  Validator model: `{ctx.validator.name}`",
+        "",
+        "## Summary",
+        "",
+        f"- Confirmed: {len(confirmed)}",
+        f"- Needs validation: {len(needs)}",
+        f"- Rejected: {len(rejected)}",
+        "",
+    ]
+    if confirmed:
+        lines += ["## Confirmed findings", ""]
+        for f in confirmed:
+            loc = f.get("location") or {}
+            lines.append(f"### {f.get('title', f['id'])}")
+            lines.append(f"- Class: {f.get('attack_class')}  ·  Severity: {f.get('severity')}")
+            lines.append(f"- Location: `{loc.get('file')}:{loc.get('line', '')}`")
+            lines.append("")
+
+    wishes = ctx.store.wishes(ctx.run_id)
+    if wishes:
+        lines += ["## Wishlist (what hunters needed)", ""]
+        for w in wishes:
+            lines.append(f"- [{w['stage']}] {w['item']}")
+        lines.append("")
+
+    (ctx.out_dir / "REPORT.md").write_text("\n".join(lines) + "\n")
+
+    return {"confirmed": len(confirmed), "needs_validation": len(needs),
+            "rejected": len(rejected), "out_dir": str(ctx.out_dir)}

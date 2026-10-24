@@ -1,0 +1,13 @@
+OpenPlow
+Copyright (c) 2026 Ian Drummond
+
+This product includes and is derived in part from the Cloudflare
+"security-audit" skill:
+
+    https://github.com/cloudflare/security-audit-skill
+    Copyright (c) Cloudflare, Inc.
+    Licensed under the MIT License.
+
+The attack-class prompts, finding schema, and audit methodology are adapted
+from that project. Its MIT license notice is retained in skills/ where its
+files are vendored.

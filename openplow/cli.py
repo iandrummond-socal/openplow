@@ -1,0 +1,115 @@
+"""OpenPlow command-line interface.
+
+    openplow run <repo> [--adapter stub] [--validator-adapter ...] [--resume ID]
+    openplow status <run-id>
+    openplow findings <run-id> [--verdict confirmed]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import uuid
+from pathlib import Path
+
+from . import __version__
+from .context import RunContext
+from .db import Store
+from .models import build_adapter
+from .orchestrator import start_run
+from .sandbox import build_sandbox
+
+DEFAULT_RUNS_DIR = Path("openplow-runs")
+DEFAULT_DB = DEFAULT_RUNS_DIR / "openplow.sqlite"
+
+
+def _store() -> Store:
+    DEFAULT_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    return Store(DEFAULT_DB)
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).resolve()
+    if not repo.is_dir():
+        print(f"error: target repo not found: {repo}", file=sys.stderr)
+        return 2
+
+    run_id = args.resume or f"run-{uuid.uuid4().hex[:12]}"
+    out_dir = DEFAULT_RUNS_DIR / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    store = _store()
+    finder = build_adapter(args.adapter)
+    # The validator must be a DIFFERENT model from the finder in real runs; for
+    # the stub they are the same no-op adapter.
+    validator = build_adapter(args.validator_adapter or args.adapter)
+    sandbox = build_sandbox(args.sandbox, out_dir / "scratch")
+
+    ctx = RunContext(run_id=run_id, repo=repo, out_dir=out_dir, store=store,
+                     finder=finder, validator=validator, sandbox=sandbox)
+
+    print(f"OpenPlow {__version__}  run={run_id}  repo={repo.name}  "
+          f"finder={finder.name}  validator={validator.name}")
+    summary = start_run(ctx, resume=bool(args.resume))
+    print(f"done: processed={summary.processed} failed={summary.failed}")
+    print(f"artifacts: {out_dir}")
+    store.close()
+    return 1 if summary.failed else 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    store = _store()
+    run = store.get_run(args.run_id)
+    if not run:
+        print(f"no such run: {args.run_id}", file=sys.stderr)
+        return 2
+    counts = store.task_counts(args.run_id)
+    print(json.dumps({"run": run, "tasks": counts}, indent=2))
+    store.close()
+    return 0
+
+
+def cmd_findings(args: argparse.Namespace) -> int:
+    store = _store()
+    findings = store.findings(args.run_id, verdict=args.verdict)
+    print(json.dumps(findings, indent=2))
+    store.close()
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="openplow", description=__doc__)
+    p.add_argument("--version", action="version", version=f"openplow {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    run = sub.add_parser("run", help="run the pipeline against a target repo")
+    run.add_argument("repo", help="path to the target checkout")
+    run.add_argument("--adapter", default="stub",
+                     help="finder model adapter (e.g. stub, anthropic:<model-id>)")
+    run.add_argument("--validator-adapter", default=None,
+                     help="validator model adapter; defaults to --adapter")
+    run.add_argument("--sandbox", default="stub", choices=["stub", "unshare"])
+    run.add_argument("--resume", default=None, metavar="RUN_ID",
+                     help="resume an interrupted run")
+    run.set_defaults(func=cmd_run)
+
+    st = sub.add_parser("status", help="show a run's state")
+    st.add_argument("run_id")
+    st.set_defaults(func=cmd_status)
+
+    fn = sub.add_parser("findings", help="print a run's findings as JSON")
+    fn.add_argument("run_id")
+    fn.add_argument("--verdict", choices=["confirmed", "needs_validation", "rejected"],
+                    default=None)
+    fn.set_defaults(func=cmd_findings)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
