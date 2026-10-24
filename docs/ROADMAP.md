@@ -40,9 +40,11 @@ Components 9–13 plus an evaluation suite.
 - [x] Fix: a re-hunt no longer resets an already-stored finding (first report of an id wins)
 - [x] CVE benchmark suite: 4 real-advisory reproductions (CVE-2007-4559, Zip Slip, SQLi, cmd injection) with working PoCs + real fixes; all confirm and pass the patch gate (`benchmarks/cve/`)
 - [x] PoC integrity model: only edits to *pre-existing* source count as tampering (new files an exploit creates are fine); patch gate uses separate fresh copies for before/after
+- [x] Real-model run wired up: `AnthropicAdapter` with effort + usage capture, `MeteredAdapter`, `pricing.py` cost estimation, `scripts/run_real.sh` one-command runner with preflight; run and benchmark print estimated cost
 - [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
 - [ ] More gapfill rounds driven by a coverage metric rather than a fixed cap
 - [ ] Add upstream CVE-fix targets (check out the pre-fix commit) alongside the reproductions
+- [ ] Prompt caching of the shared class-file/recon prefix to cut real-run cost
 
 ## M3 — Fleet
 Components 14–17.

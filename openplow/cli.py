@@ -16,7 +16,7 @@ from pathlib import Path
 from . import __version__
 from .context import RunContext
 from .db import Store
-from .models import build_adapter
+from .models import MeteredAdapter, build_adapter
 from .orchestrator import start_run
 from .sandbox import build_sandbox
 
@@ -40,10 +40,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     store = _store()
-    finder = build_adapter(args.adapter)
     # The validator must be a DIFFERENT model from the finder in real runs; for
-    # the stub they are the same no-op adapter.
-    validator = build_adapter(args.validator_adapter or args.adapter)
+    # the stub they are the same no-op adapter. Both are metered for cost.
+    finder = MeteredAdapter(build_adapter(args.adapter, effort=args.effort),
+                            store, run_id, repo.name, "finder")
+    validator = MeteredAdapter(build_adapter(args.validator_adapter or args.adapter,
+                                             effort=args.effort),
+                               store, run_id, repo.name, "validator")
     sandbox = build_sandbox(args.sandbox, out_dir / "scratch")
 
     ctx = RunContext(run_id=run_id, repo=repo, out_dir=out_dir, store=store,
@@ -53,9 +56,33 @@ def cmd_run(args: argparse.Namespace) -> int:
           f"finder={finder.name}  validator={validator.name}")
     summary = start_run(ctx, resume=bool(args.resume))
     print(f"done: processed={summary.processed} failed={summary.failed}")
+    if summary.final:
+        print(f"confirmed={summary.final.get('confirmed')} "
+              f"fix_verified={summary.final.get('fix_verified')} "
+              f"needs_validation={summary.final.get('needs_validation')} "
+              f"rejected={summary.final.get('rejected')}")
+    _print_cost(store, run_id)
     print(f"artifacts: {out_dir}")
     store.close()
     return 1 if summary.failed else 0
+
+
+def _print_cost(store: Store, run_id: str) -> None:
+    from .pricing import Usage, estimate_cost
+    rows = store.usage_by_model(run_id)
+    if not rows:
+        return
+    total = 0.0
+    priced = True
+    for r in rows:
+        u = Usage(r["input_tokens"], r["output_tokens"], r["cache_read"], r["cache_creation"])
+        c = estimate_cost(r["model"], u)
+        if c is None:
+            priced = False
+        else:
+            total += c
+    note = "" if priced else " (some models unpriced)"
+    print(f"estimated cost: ${total:.4f}{note}")
 
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
@@ -67,11 +94,13 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
           f"finder={args.adapter}  validator={args.validator_adapter or args.adapter}")
     report = run_benchmark(spec, finder_spec=args.adapter,
                            validator_spec=args.validator_adapter,
-                           sandbox_kind=args.sandbox, out_dir=out_dir)
+                           sandbox_kind=args.sandbox, out_dir=out_dir, effort=args.effort)
     t = report.totals
     print(f"recall={t['recall']:.0%} confirmed_recall={t['confirmed_recall']:.0%} "
           f"rejection_rate={t['rejection_rate']:.0%} "
           f"unmatched_confirmed={t['unmatched_confirmed']}")
+    cost_note = "" if t.get("cost_fully_priced", True) else " (some models unpriced)"
+    print(f"estimated cost: ${t.get('estimated_cost_usd', 0.0):.4f}{cost_note}")
     print(f"report: {out_dir / 'benchmark-report.md'}")
     return 0
 
@@ -108,6 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--validator-adapter", default=None,
                      help="validator model adapter; defaults to --adapter")
     run.add_argument("--sandbox", default="stub", choices=["stub", "unshare"])
+    run.add_argument("--effort", default="high",
+                     choices=["low", "medium", "high", "xhigh", "max"],
+                     help="model effort for Anthropic adapters (default high)")
     run.add_argument("--resume", default=None, metavar="RUN_ID",
                      help="resume an interrupted run")
     run.set_defaults(func=cmd_run)
@@ -117,6 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
     bm.add_argument("--adapter", default="stub", help="finder model adapter")
     bm.add_argument("--validator-adapter", default=None, help="validator adapter")
     bm.add_argument("--sandbox", default="stub", choices=["stub", "unshare"])
+    bm.add_argument("--effort", default="high",
+                    choices=["low", "medium", "high", "xhigh", "max"],
+                    help="model effort for Anthropic adapters (default high)")
     bm.add_argument("--out", default="openplow-benchmarks", help="output directory")
     bm.set_defaults(func=cmd_benchmark)
 

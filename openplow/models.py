@@ -92,9 +92,11 @@ class AnthropicAdapter(ModelAdapter):
     Install with ``pip install 'openplow[anthropic]'``.
     """
 
-    def __init__(self, model: str, api_key: str | None = None, *, name: str | None = None):
+    def __init__(self, model: str, api_key: str | None = None, *, name: str | None = None,
+                 effort: str | None = "high"):
         self.model = model
         self.name = name or f"anthropic:{model}"
+        self.effort = effort  # output_config effort; "high" is good for audit work
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._client: Any = None
 
@@ -112,22 +114,42 @@ class AnthropicAdapter(ModelAdapter):
         return self._client
 
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
+        # Note: temperature/top_p are intentionally not sent — current models
+        # reject non-default sampling. Thinking is adaptive by default (omitted).
         try:
             client = self._ensure_client()
-            msg = client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "max_tokens": max_tokens,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if self.effort:
+                kwargs["output_config"] = {"effort": self.effort}
+            msg = client.messages.create(**kwargs)
             text = "".join(
                 block.text for block in msg.content if getattr(block, "type", None) == "text"
             )
             outcome = classify_body(text)
-            return ModelResponse(outcome=outcome, text=text,
-                                 raw={"stop_reason": getattr(msg, "stop_reason", None)})
+            return ModelResponse(outcome=outcome, text=text, raw={
+                "stop_reason": getattr(msg, "stop_reason", None),
+                "model": self.model,
+                "usage": _extract_usage(msg),
+            })
         except Exception as exc:  # noqa: BLE001 - adapter boundary
             return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc))
+
+
+def _extract_usage(msg: Any) -> dict[str, int]:
+    u = getattr(msg, "usage", None)
+    if u is None:
+        return {}
+    return {
+        "input_tokens": getattr(u, "input_tokens", 0) or 0,
+        "output_tokens": getattr(u, "output_tokens", 0) or 0,
+        "cache_read_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
+        "cache_creation_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
+    }
 
 
 class FixtureAdapter(ModelAdapter):
@@ -186,20 +208,53 @@ def _classify_exception(exc: Exception) -> Outcome:
     return Outcome.FATAL
 
 
+class MeteredAdapter(ModelAdapter):
+    """Wraps an adapter and records each call's token usage to the store, so the
+    report can estimate what a run cost. Transparent otherwise."""
+
+    def __init__(self, inner: ModelAdapter, store: Any, run_id: str, repo: str, role: str):
+        self.inner = inner
+        self.name = inner.name
+        self._store = store
+        self._run_id = run_id
+        self._repo = repo
+        self._role = role
+
+    @property
+    def model(self) -> str:
+        return getattr(self.inner, "model", self.inner.name)
+
+    def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
+        resp = self.inner.complete(system, prompt, max_tokens=max_tokens)
+        usage = (resp.raw or {}).get("usage") or {}
+        if usage:
+            self._store.add_usage(
+                self._run_id, self._repo, self._role,
+                (resp.raw or {}).get("model", self.model),
+                int(usage.get("input_tokens", 0)),
+                int(usage.get("output_tokens", 0)),
+                int(usage.get("cache_read_tokens", 0)),
+                int(usage.get("cache_creation_tokens", 0)),
+            )
+        return resp
+
+
 # Registry so the CLI can select an adapter by a short name.
 _BUILTIN = {"stub": lambda **kw: StubAdapter()}
 
 
-def build_adapter(spec: str, **kwargs: Any) -> ModelAdapter:
+def build_adapter(spec: str, *, effort: str | None = None) -> ModelAdapter:
     """Build an adapter from a short spec.
 
     ``stub``                 -> StubAdapter
+    ``fixture:<path>``       -> FixtureAdapter replaying that fixture
     ``anthropic:<model-id>`` -> AnthropicAdapter(model=<model-id>)
     """
     if spec in _BUILTIN:
-        return _BUILTIN[spec](**kwargs)
+        return _BUILTIN[spec]()
     if spec.startswith("anthropic:"):
-        return AnthropicAdapter(model=spec.split(":", 1)[1], **kwargs)
+        kw = {"effort": effort} if effort else {}
+        return AnthropicAdapter(model=spec.split(":", 1)[1], **kw)
     if spec.startswith("fixture:"):
-        return FixtureAdapter.from_path(spec.split(":", 1)[1], **kwargs)
+        return FixtureAdapter.from_path(spec.split(":", 1)[1])
     raise ValueError(f"unknown adapter spec: {spec!r}")

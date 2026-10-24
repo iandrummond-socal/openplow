@@ -90,6 +90,25 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
                 lines.append(f"- Fix verified: {mark} ({fix.get('reason', '')})")
             lines.append("")
 
+    usage = ctx.store.usage_by_model(ctx.run_id)
+    if usage:
+        from .. import pricing
+        lines += ["## Cost (estimated)", "",
+                  "| Role | Model | Calls | Input | Output | Est. $ |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        total = 0.0
+        for u in usage:
+            usg = pricing.Usage(u["input_tokens"], u["output_tokens"],
+                                u["cache_read"], u["cache_creation"])
+            cost = pricing.estimate_cost(u["model"], usg)
+            total += cost or 0.0
+            cost_str = f"${cost:.4f}" if cost is not None else "n/a"
+            lines.append(f"| {u['role']} | {u['model']} | {u['calls']} | "
+                         f"{u['input_tokens']} | {u['output_tokens']} | {cost_str} |")
+        lines.append("")
+        lines.append(f"**Estimated total: ${total:.4f}**")
+        lines.append("")
+
     wishes = ctx.store.wishes(ctx.run_id)
     if wishes:
         lines += ["## Wishlist (what hunters needed)", ""]

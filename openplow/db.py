@@ -70,8 +70,23 @@ CREATE TABLE IF NOT EXISTS wishlist (
     created_at  REAL NOT NULL
 );
 
+-- One row per model call, for cost accounting.
+CREATE TABLE IF NOT EXISTS usage (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL,
+    repo            TEXT NOT NULL,
+    role            TEXT NOT NULL,                 -- finder|validator
+    model           TEXT NOT NULL,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    cache_read      INTEGER NOT NULL DEFAULT 0,
+    cache_creation  INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_run_status ON tasks (run_id, status);
 CREATE INDEX IF NOT EXISTS idx_findings_run ON findings (run_id);
+CREATE INDEX IF NOT EXISTS idx_usage_run ON usage (run_id);
 """
 
 
@@ -240,6 +255,30 @@ class Store:
     def wishes(self, run_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT stage, item, created_at FROM wishlist WHERE run_id = ? ORDER BY created_at",
+            (run_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- usage ----------------------------------------------------------
+
+    def add_usage(self, run_id: str, repo: str, role: str, model: str,
+                  input_tokens: int, output_tokens: int,
+                  cache_read: int, cache_creation: int) -> None:
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO usage (run_id, repo, role, model, input_tokens, output_tokens, "
+                "cache_read, cache_creation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (run_id, repo, role, model, input_tokens, output_tokens,
+                 cache_read, cache_creation, _now()),
+            )
+
+    def usage_by_model(self, run_id: str) -> list[dict[str, Any]]:
+        """Aggregated token usage per (role, model) for a run."""
+        rows = self._conn.execute(
+            "SELECT role, model, COUNT(*) calls, "
+            "SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens, "
+            "SUM(cache_read) cache_read, SUM(cache_creation) cache_creation "
+            "FROM usage WHERE run_id = ? GROUP BY role, model",
             (run_id,),
         ).fetchall()
         return [dict(r) for r in rows]

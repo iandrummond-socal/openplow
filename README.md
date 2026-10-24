@@ -69,17 +69,39 @@ Run the full pipeline against a target repo using the built-in stub adapter
 openplow run /path/to/target-repo --adapter stub
 ```
 
-Run against a real model (finder and validator should differ so each checks the
-other):
+### Real-model run
+
+Finder and validator should be **different** models so each checks the other.
+The one-command runner does the preflight (key present, extras installed) for
+you:
 
 ```bash
-export ANTHROPIC_API_KEY=...
+export ANTHROPIC_API_KEY=sk-ant-...
+# target repo:
+scripts/run_real.sh /path/to/target-repo
+# or the CVE benchmark:
+scripts/run_real.sh --benchmark benchmarks/cve/benchmark.json
+```
+
+Defaults: finder `claude-opus-5-5`, validator `claude-sonnet-5-5`, sandbox
+`unshare`, effort `high`. Override by passing model ids
+(`scripts/run_real.sh <repo> claude-opus-5-5 claude-haiku-5-5`) or via
+`OPENPLOW_SANDBOX` / `OPENPLOW_EFFORT`.
+
+The equivalent explicit command:
+
+```bash
 pip install -e '.[anthropic,schema]'
 openplow run /path/to/target-repo \
-  --adapter anthropic:<finder-model-id> \
-  --validator-adapter anthropic:<validator-model-id> \
-  --sandbox unshare
+  --adapter anthropic:claude-opus-5-5 \
+  --validator-adapter anthropic:claude-sonnet-5-5 \
+  --sandbox unshare --effort high
 ```
+
+**Cost.** Every model call's token usage is recorded; the run and the benchmark
+print an estimated cost and the report has a per-model cost table. Prices are in
+`openplow/pricing.py` (update when rates change). Start on a small target to
+calibrate before a large scan.
 
 Results land in `./openplow-runs/<run-id>/` and in the run database. Resume an
 interrupted run:
@@ -120,6 +142,8 @@ to score a real model. See [`benchmarks/README.md`](benchmarks/README.md).
 | `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects tampering; fail→pass patch gate |
 | `openplow/stages/` | `recon`, `hunt`, `validate`, `gapfill`, `dedup`, `report` |
 | `openplow/benchmark.py` | Runs the pipeline over known-vuln targets and scores recall + noise |
+| `openplow/pricing.py` | Model prices + per-run cost estimation |
+| `scripts/run_real.sh` | One-command real-model run, with preflight |
 | `openplow/schemas/` | Finding JSON schema |
 | `skills/` | Vendored Cloudflare `security-audit` skill (see `skills/README.md`) |
 | `benchmarks/` | Benchmark specs + sample known-vuln targets (see `benchmarks/README.md`) |

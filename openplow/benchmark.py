@@ -43,9 +43,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import pricing
 from .context import RunContext
 from .db import Store
-from .models import build_adapter
+from .models import MeteredAdapter, build_adapter
 from .orchestrator import start_run
 from .sandbox import build_sandbox
 
@@ -205,29 +206,53 @@ def _aggregate(name: str, finder: str, validator: str,
 # ---- running ------------------------------------------------------------
 
 def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str | None,
-                  sandbox_kind: str, out_dir: Path) -> BenchmarkReport:
+                  sandbox_kind: str, out_dir: Path, effort: str | None = None) -> BenchmarkReport:
     out_dir.mkdir(parents=True, exist_ok=True)
-    finder = build_adapter(finder_spec)
-    validator = build_adapter(validator_spec or finder_spec)
 
     scores: list[TargetScore] = []
+    total_cost = 0.0
+    cost_priced = True
     for target in spec.targets:
         repo = (spec.base_dir / target.path).resolve()
         run_id = f"bench-{target.name}-{uuid.uuid4().hex[:8]}"
         target_out = out_dir / run_id
         target_out.mkdir(parents=True, exist_ok=True)
         store = Store(out_dir / "benchmark.sqlite")
+        finder = MeteredAdapter(build_adapter(finder_spec, effort=effort),
+                                store, run_id, repo.name, "finder")
+        validator = MeteredAdapter(build_adapter(validator_spec or finder_spec, effort=effort),
+                                   store, run_id, repo.name, "validator")
         ctx = RunContext(run_id=run_id, repo=repo, out_dir=target_out, store=store,
                          finder=finder, validator=validator,
                          sandbox=build_sandbox(sandbox_kind, target_out / "scratch"))
         start_run(ctx)
-        findings = store.findings(run_id)
-        scores.append(score_target(target, findings))
+        scores.append(score_target(target, store.findings(run_id)))
+        c, priced = _run_cost(store, run_id)
+        total_cost += c
+        cost_priced = cost_priced and priced
         store.close()
 
-    report = _aggregate(spec.name, finder.name, validator.name, scores)
+    finder_name = (build_adapter(finder_spec)).name
+    validator_name = (build_adapter(validator_spec or finder_spec)).name
+    report = _aggregate(spec.name, finder_name, validator_name, scores)
+    report.totals["estimated_cost_usd"] = round(total_cost, 4)
+    report.totals["cost_fully_priced"] = cost_priced
     _write_report(report, out_dir)
     return report
+
+
+def _run_cost(store: Store, run_id: str) -> tuple[float, bool]:
+    total = 0.0
+    priced = True
+    for u in store.usage_by_model(run_id):
+        usg = pricing.Usage(u["input_tokens"], u["output_tokens"],
+                            u["cache_read"], u["cache_creation"])
+        c = pricing.estimate_cost(u["model"], usg)
+        if c is None:
+            priced = False
+        else:
+            total += c
+    return total, priced
 
 
 def _write_report(report: BenchmarkReport, out_dir: Path) -> None:
@@ -252,6 +277,8 @@ def _write_report(report: BenchmarkReport, out_dir: Path) -> None:
         (f"- Validation rejection rate: {t['rejection_rate']:.0%} "
          f"({t['rejected']}/{t['candidates_total']})"),
         f"- Unmatched confirmed (possible FP or new bug): {t['unmatched_confirmed']}",
+        (f"- Estimated cost: ${t.get('estimated_cost_usd', 0.0):.4f}"
+         + ("" if t.get("cost_fully_priced", True) else " (some models unpriced)")),
         "",
         "## Per target",
         "",
