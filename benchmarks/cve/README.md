@@ -17,6 +17,12 @@ verifies the shipped fix with the fail→pass patch gate.
 | `sqli-sqlite` | CWE-89 (representative of many CVEs) | user input string-formatted into SQL → auth bypass | parameterized query |
 | `cmd-injection` | CWE-78 (representative of many CVEs) | host interpolated into a `shell=True` command → RCE | pass an argv list, no shell |
 
+The target source carries no hints: no `VULN` comments and no docstrings
+naming the advisory, because the finder reads the source and would be told the
+answer. Real-model results from before this change (runs 1–5 in PR #1) were
+measured *with* those hints, so they overstate recall and are not directly
+comparable with later runs.
+
 For false positives, see the [decoy benchmark](../decoys/README.md): the same
 four shapes with no bug, scored separately. `benchmarks/cve-and-decoys.json`
 runs both suites in one report.
