@@ -129,13 +129,23 @@ _ARCHES = {
     }, 220, 435),
 }
 
+# socket(2) per arch. A sibling of _ARCHES rather than a fifth tuple member, so
+# existing code that unpacks the four-member tuple keeps working.
+_SOCKET_NR = {"x86_64": 41, "aarch64": 198}
+AF_UNIX = 1  # AF_LOCAL is the same number
 
-def build_seccomp_program(machine: str | None = None) -> bytes:
+
+def build_seccomp_program(machine: str | None = None, *, deny_unix_sockets: bool = True) -> bytes:
     """Return the classic-BPF program for ``machine`` as packed ``sock_filter``s.
 
     Denylist: the listed syscalls fail with EPERM; ``clone3`` fails with ENOSYS
     so libc falls back to ``clone``, whose flags are checked; ``clone`` with any
     ``CLONE_NEW*`` flag fails with EPERM; a wrong architecture is killed.
+    With ``deny_unix_sockets``, ``socket(AF_UNIX, ...)`` also fails with EPERM:
+    the empty network namespace does not stop filesystem sockets, and a
+    read-only mount does not stop ``connect()`` on one, so this is the backstop
+    for host sockets no mount hides. ``socketpair`` stays allowed, because
+    multiprocessing, asyncio and subprocess rely on it.
     Raises ``RuntimeError`` on an architecture it has no table for.
     """
     machine = machine or platform.machine()
@@ -154,6 +164,8 @@ def build_seccomp_program(machine: str | None = None) -> bytes:
         prog.append((_JGE_K, "kill", None, 0x40000000))          # x32 ABI: no
     prog.append((_JEQ_K, "clone", None, clone_nr))
     prog.append((_JEQ_K, "enosys", None, clone3_nr))
+    if deny_unix_sockets:
+        prog.append((_JEQ_K, "sock", None, _SOCKET_NR[machine]))
     for nr in sorted(set(names.values())):
         prog.append((_JEQ_K, "eperm", None, nr))
     prog.append((_RET_K, None, None, SECCOMP_RET_ALLOW))
@@ -161,6 +173,10 @@ def build_seccomp_program(machine: str | None = None) -> bytes:
     prog.append((_LD_W_ABS, None, None, 16))                     # args[0] = clone flags
     prog.append((_AND_K, None, None, CLONE_NEW_MASK))
     prog.append((_JEQ_K, "allow", "eperm", 0))
+    if deny_unix_sockets:
+        prog.append(("label", "sock", None, 0))                  # type: ignore[arg-type]
+        prog.append((_LD_W_ABS, None, None, 16))                 # args[0] = domain
+        prog.append((_JEQ_K, "eperm", "allow", AF_UNIX))
     prog.append(("label", "allow", None, 0))                     # type: ignore[arg-type]
     prog.append((_RET_K, None, None, SECCOMP_RET_ALLOW))
     prog.append(("label", "eperm", None, 0))                     # type: ignore[arg-type]
@@ -382,12 +398,12 @@ def drop_capabilities() -> None:
         cap += 1
 
 
-def apply_seccomp() -> None:
+def apply_seccomp(deny_unix_sockets: bool = True) -> None:
     libc = _libc()
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         _fail("could not set no_new_privs")
     try:
-        program = build_seccomp_program()
+        program = build_seccomp_program(deny_unix_sockets=deny_unix_sockets)
     except RuntimeError as exc:
         _fail(str(exc))
     buf = ctypes.create_string_buffer(program, len(program))
@@ -406,6 +422,7 @@ def main(argv: list[str]) -> None:
     status_fd: int | None = None
     readonly = seccomp = True
     do_minimal_dev = do_proc_harden = True
+    deny_unix_sockets = True
     i = 0
     while i < len(argv) and argv[i] != "--":
         if argv[i] == "--rw":
@@ -429,8 +446,11 @@ def main(argv: list[str]) -> None:
         elif argv[i] == "--no-proc-harden":
             do_proc_harden = False
             i += 1
-        elif argv[i] in ("--no-host-dirs", "--allow-unix-sockets"):
-            i += 1  # part of the launcher contract; wired in by later checkpoints
+        elif argv[i] == "--allow-unix-sockets":
+            deny_unix_sockets = False
+            i += 1
+        elif argv[i] == "--no-host-dirs":
+            i += 1  # part of the launcher contract; hiding /run and /tmp is not built yet
         else:
             _fail(f"unknown option {argv[i]!r}")
     command = argv[i + 1:]
@@ -458,8 +478,10 @@ def main(argv: list[str]) -> None:
     drop_capabilities()
     applied.append("no_capabilities")
     if seccomp:
-        apply_seccomp()
+        apply_seccomp(deny_unix_sockets)
         applied.append("seccomp")
+        if deny_unix_sockets:  # the filter just loaded carries the AF_UNIX rule
+            applied.append("unix_sockets_blocked")
     if status_fd is not None:
         os.set_inheritable(status_fd, False)  # closed by exec: the payload never sees it
         os.write(status_fd, ",".join(applied).encode())

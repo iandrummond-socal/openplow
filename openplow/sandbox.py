@@ -282,6 +282,12 @@ class UnshareSandbox(Sandbox):
       (``proc_hardened``);
     * every capability is dropped, and a seccomp denylist blocks mount, ptrace,
       bpf, module loading, namespace creation and io_uring (``seccomp``);
+    * creating a unix socket (``socket(AF_UNIX, ...)``) fails with EPERM, so the
+      payload cannot reach host daemons (ssh-agent, DBus, ``docker.sock``,
+      gpg-agent) wherever their sockets sit (``unix_sockets_blocked``).
+      ``socketpair`` still works, so multiprocessing, asyncio and subprocess are
+      unaffected. This default BREAKS a PoC that runs or talks to its own
+      unix-socket server; such a PoC needs ``allow_unix_sockets=True``;
     * the base rlimit caps, including a 2 GiB data-segment cap by default.
 
     The filesystem, ``/dev``, ``/proc``, capability and seccomp steps run in
@@ -297,12 +303,13 @@ class UnshareSandbox(Sandbox):
 
     def __init__(self, scratch: str | Path, *, readonly_fs: bool = True,
                  seccomp: bool = True, minimal_dev: bool = True,
-                 harden_proc: bool = True, **kwargs):
+                 harden_proc: bool = True, allow_unix_sockets: bool = False, **kwargs):
         super().__init__(scratch, **kwargs)
         self.readonly_fs = readonly_fs
         self.seccomp = seccomp
         self.minimal_dev = minimal_dev
         self.harden_proc = harden_proc
+        self.allow_unix_sockets = allow_unix_sockets
 
     @staticmethod
     def available() -> bool:
@@ -334,6 +341,8 @@ class UnshareSandbox(Sandbox):
             init += ["--no-minimal-dev"]
         if not self.harden_proc:
             init += ["--no-proc-harden"]
+        if self.allow_unix_sockets:
+            init += ["--allow-unix-sockets"]
         if status_fd is not None:
             init += ["--status-fd", str(status_fd)]
         # --kill-child: a timeout kills `unshare`, and without this the payload
@@ -383,6 +392,7 @@ class UnshareSandbox(Sandbox):
             "seccomp": "seccomp" in applied,
             "minimal_dev": "minimal_dev" in applied,
             "proc_hardened": "proc_hardened" in applied,
+            "unix_sockets_blocked": "unix_sockets_blocked" in applied,
             # heap_limit is the RLIMIT_DATA fallback; memory_cap is the hard cgroup cap
             # and is False wherever no cgroup was delegated.
             "heap_limit": reached and self.limits.memory_mb > 0,
