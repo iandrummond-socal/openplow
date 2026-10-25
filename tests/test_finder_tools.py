@@ -216,3 +216,36 @@ def test_hunt_does_not_flag_explicit_empty_answer(tmp_path, repo):
     ctx = _ctx(tmp_path, repo, _ToolFinder("Nothing found.\n```json\n[]\n```"))
     hunt.run_task(ctx, {"area": "src", "attack_class": "cloud-and-deployment"})
     assert ctx.store.wishes("run-t") == []
+
+
+# ---- poc.kind -------------------------------------------------------------
+
+def _finding(kind: str) -> dict:
+    return {"id": "cmd-1", "title": "shell injection", "attack_class": "cloud-and-deployment",
+            "threat_model": {"attacker": "remote", "boundary": "input -> shell"},
+            "location": {"file": "src/app.py", "line": 4},
+            "description": "cmd reaches os.system",
+            "poc": {"kind": kind, "content": "print('x')", "observed": "x"},
+            "patch": None}
+
+
+def test_python_poc_kind_is_filed_as_script(tmp_path, repo):
+    ctx = _ctx(tmp_path, repo, _ToolFinder("```json\n" + json.dumps([_finding("Python")])
+                                           + "\n```"))
+    result = hunt.run_task(ctx, {"area": "src", "attack_class": "cloud-and-deployment"})
+    assert result["findings"] == 1
+    assert ctx.store.findings("run-t")[0]["poc"]["kind"] == "script"
+
+
+def test_other_language_poc_kind_is_still_dropped(tmp_path, repo):
+    ctx = _ctx(tmp_path, repo, _ToolFinder("```json\n" + json.dumps([_finding("bash")])
+                                           + "\n```"))
+    result = hunt.run_task(ctx, {"area": "src", "attack_class": "cloud-and-deployment"})
+    assert result["findings"] == 0 and result["dropped"] == 1
+
+
+def test_system_prompt_lists_poc_kinds(tmp_path, repo):
+    finder = _ToolFinder("[]")
+    hunt.run_task(_ctx(tmp_path, repo, finder),
+                  {"area": "src", "attack_class": "cloud-and-deployment"})
+    assert all(k in (finder.system or "") for k in ('"test"', '"script"', '"input"', '"trace"'))

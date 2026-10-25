@@ -64,8 +64,18 @@ _SYSTEM = (
     "Return ONLY a JSON array of findings in a ```json fenced block. Each finding "
     "must have: id, verdict (always \"needs_validation\"), title, attack_class, "
     "threat_model {attacker, boundary}, location {file, line, symbol}, description, "
-    "poc {kind, content, observed}, patch."
+    "poc {kind, content, observed}, patch.\n\n"
+    "poc.kind is the PoC's role, not its language, and must be one of: "
+    "\"test\" or \"script\" (a Python file, run with python3 from the repo root "
+    "against the untouched code; it must exit 0 and print the \"observed\" text), "
+    "\"input\" (a malicious input to feed the target) or \"trace\" (a step-by-step "
+    "path through the code). Only test and script PoCs are executed and can verify "
+    "a patch, so use one of them whenever the issue can be demonstrated in Python."
 )
+
+# Language names a model may put in poc.kind. Only Python maps cleanly: test and
+# script PoCs are run with python3, so another language would run wrongly.
+_POC_KIND_ALIASES = {"python": "script", "python3": "script", "py": "script"}
 
 
 def _area_files(repo: Path, area: str) -> list[str]:
@@ -169,6 +179,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         if finding["id"] in existing_ids:
             skipped += 1
             continue
+        _normalize_poc_kind(finding)
         finding["verdict"] = "needs_validation"
         finding.setdefault("attack_class", attack_class)
         finding["provenance"] = {
@@ -192,6 +203,13 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     _write_transcript(ctx, area, attack_class, depth, record)
     return {"area": area, "attack_class": attack_class, "findings": filed,
             "dropped": dropped, "skipped": skipped}
+
+
+def _normalize_poc_kind(finding: dict[str, Any]) -> None:
+    """Map a Python language name in poc.kind to the "script" role."""
+    poc = finding.get("poc")
+    if isinstance(poc, dict) and isinstance(poc.get("kind"), str):
+        poc["kind"] = _POC_KIND_ALIASES.get(poc["kind"].strip().lower(), poc["kind"])
 
 
 def _is_empty_answer(text: str) -> bool:
