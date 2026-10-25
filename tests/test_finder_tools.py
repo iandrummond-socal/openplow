@@ -266,3 +266,52 @@ def test_system_prompt_states_observed_and_patch_rules(tmp_path, repo):
     hunt.run_task(_ctx(tmp_path, repo, finder),
                   {"area": "src", "attack_class": "cloud-and-deployment"})
     assert "exact substring" in finder.system and "@@ -start,count +start,count @@" in finder.system
+
+
+# ---- patch gate: miscounted hunks ------------------------------------------
+
+_MISCOUNTED = """--- a/src/app.py
++++ b/src/app.py
+@@ -3,2 +3,9 @@
+ def run(cmd):
+-    os.system(cmd)
++    import subprocess
++    subprocess.run(["echo", cmd], check=False)
+"""
+
+
+def test_recount_hunks_fixes_line_counts():
+    from openplow.poc import recount_hunks
+    assert "@@ -3,2 +3,3 @@" in recount_hunks(_MISCOUNTED)
+
+
+def test_apply_patch_recovers_from_miscounted_hunk(tmp_path, repo):
+    from openplow.poc import apply_patch
+    target = tmp_path / "copy"
+    import shutil
+    shutil.copytree(repo, target)
+    ok, reason = apply_patch(target, {"patch": _MISCOUNTED})
+    assert ok and "recomputed" in reason
+    assert "subprocess.run" in (target / "src" / "app.py").read_text()
+
+
+# ---- validator gets the tools ----------------------------------------------
+
+def test_validator_reads_repo_and_saves_transcript(tmp_path, repo):
+    from openplow.stages import validate
+
+    class _Validator(_ToolFinder):
+        name = "tool-validator"
+
+    validator = _Validator("Read src/app.py; os.system(cmd) is reachable.\nVERDICT: confirmed")
+    ctx = _ctx(tmp_path, repo, _ToolFinder("[]"))
+    ctx.validator = validator
+    f = _finding("input")
+    f["verdict"] = "needs_validation"
+    ctx.store.upsert_finding("run-t", repo.name, "hunt", f)
+    result = validate.run_task(ctx, {"finding_id": "cmd-1"})
+    assert result["verdict"] == "confirmed"
+    assert "os.system(cmd)" in (validator.read or "")
+    assert "read_file" in (validator.system or "")
+    record = json.loads((ctx.out_dir / "transcripts" / "validate" / "cmd-1.json").read_text())
+    assert record["text"].endswith("VERDICT: confirmed")

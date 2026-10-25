@@ -9,7 +9,10 @@ Three checks, and the validator can never file a finding itself:
   target (``openplow.poc``). Reproduction against untouched code is the ground
   truth; a PoC that tampers with source is rejected outright.
 * **Pass 2, adversarial.** A *fresh, isolated* agent — a different model from the
-  finder — tries to disprove the finding and returns an explicit verdict.
+  finder — tries to disprove the finding and returns an explicit verdict. A
+  validator that supports tool use gets the same read-only repo tools as the
+  finder, so it checks the claim against the code rather than the finding's
+  own quotes; its raw output goes to ``<out>/transcripts/validate/<id>.json``.
 
 The verdict combines them: a tampering PoC or one that fails to reproduce is
 rejected; an executed PoC that reproduces is confirmed unless the adversarial
@@ -18,11 +21,39 @@ model disproves it; a non-executable PoC falls back to the model verdict.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from .. import poc as poc_mod
 from ..context import RunContext
-from ..models import Outcome
+from ..models import ModelResponse, Outcome
+from ..repo_tools import RepoTools
+
+# Tool rounds the validator may spend reading code before it must answer.
+_MAX_TOOL_ROUNDS = 30
+
+_TOOLS_NOTE = (
+    "\n\nYou have read-only tools over the target repository: list_files, read_file "
+    "and grep (paths relative to the repo root). Check the finding against the actual "
+    "code — do not take its quoted code or line numbers on trust."
+)
+
+
+def _write_transcript(ctx: RunContext, finding: dict[str, Any], system: str, prompt: str,
+                      resp: ModelResponse) -> None:
+    """Persist the validator's raw output for later diagnosis."""
+    raw = resp.raw or {}
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(finding.get("id", "unknown")))
+    path = ctx.out_dir / "transcripts" / "validate" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "finding_id": finding.get("id"), "validator": ctx.validator.name,
+        "outcome": resp.outcome.value, "error": resp.error,
+        "stop_reason": raw.get("stop_reason"), "tool_rounds": raw.get("tool_rounds"),
+        "system": system, "prompt": prompt, "text": resp.text,
+        "transcript": raw.get("transcript"),
+    }, indent=2, default=str), encoding="utf-8")
 
 
 def _pass1_deterministic(ctx: RunContext, finding: dict[str, Any]) -> list[str]:
@@ -66,7 +97,13 @@ def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, s
         "VERDICT: needs_validation (cannot resolve an exact fact)"
     )
     prompt = f"Finding to disprove:\n{finding}"
-    resp = ctx.validator.complete(system, prompt)
+    if ctx.validator.supports_tools:
+        system += _TOOLS_NOTE
+        resp = ctx.validator.complete_with_tools(system, prompt, RepoTools(ctx.repo),
+                                                 max_tokens=8192, max_rounds=_MAX_TOOL_ROUNDS)
+    else:
+        resp = ctx.validator.complete(system, prompt)
+    _write_transcript(ctx, finding, system, prompt, resp)
     if resp.outcome is Outcome.RETRYABLE:
         raise RuntimeError("validator transient failure")
     if resp.text.strip() == "STUB_OK":
