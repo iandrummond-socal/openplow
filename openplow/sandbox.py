@@ -35,7 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:  # POSIX only
@@ -50,6 +50,10 @@ class SandboxResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    # Which protections were actually active for this run, e.g. ``seccomp: True``.
+    # Empty means "none claimed": the stub backend enforces nothing beyond env,
+    # timeout and rlimits. Never assume a protection that is not listed here.
+    enforced: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -127,7 +131,8 @@ class Sandbox:
     def _wrap(self, argv: list[str]) -> list[str]:
         return argv
 
-    def _exec(self, argv: list[str], cwd: str | Path | None) -> SandboxResult:
+    def _exec(self, argv: list[str], cwd: str | Path | None, *,
+              pass_fds: tuple[int, ...] = ()) -> SandboxResult:
         try:
             proc = subprocess.run(
                 argv,
@@ -138,6 +143,7 @@ class Sandbox:
                 text=True,
                 timeout=self.timeout,
                 preexec_fn=_make_preexec(self.limits),
+                pass_fds=pass_fds,
             )
             return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
         except subprocess.TimeoutExpired as exc:
@@ -197,7 +203,8 @@ class UnshareSandbox(Sandbox):
         env["HOME"] = env["TMPDIR"] = str(self.scratch.resolve())
         return env
 
-    def _wrap(self, argv: list[str], cwd: str | Path | None = None) -> list[str]:
+    def _wrap(self, argv: list[str], cwd: str | Path | None = None,
+              status_fd: int | None = None) -> list[str]:
         init = [sys.executable, "-I", str(Path(__file__).with_name("_sandbox_init.py"))]
         if self.readonly_fs:
             init += ["--rw", str(self.scratch.resolve())]
@@ -209,16 +216,48 @@ class UnshareSandbox(Sandbox):
             init += ["--no-readonly"]
         if not self.seccomp:
             init += ["--no-seccomp"]
+        if status_fd is not None:
+            init += ["--status-fd", str(status_fd)]
+        # --kill-child: a timeout kills `unshare`, and without this the payload
+        # and its children would keep running as orphans in the pid namespace.
         return [
             "unshare", "--user", "--map-root-user", "--net", "--pid", "--fork",
-            "--mount-proc", "--",
+            "--kill-child", "--mount-proc", "--",
             *init, "--", *argv,
         ]
 
     def run(self, argv: list[str], *, cwd: str | Path | None = None) -> SandboxResult:
         if not self.available():
             raise RuntimeError("unshare not found; install util-linux or use StubSandbox")
-        return self._exec(self._wrap(argv, cwd), cwd)
+        read_fd, write_fd = os.pipe()
+        try:
+            result = self._exec(self._wrap(argv, cwd, write_fd), cwd, pass_fds=(write_fd,))
+        finally:
+            os.close(write_fd)  # the parent's copy, so the read below sees EOF
+        with os.fdopen(read_fd, "rb") as status:
+            reported = status.read().decode(errors="replace")
+        result.enforced = self._enforced(reported, result)
+        return result
+
+    def _enforced(self, reported: str, result: SandboxResult) -> dict[str, bool]:
+        """Turn the launcher's status report into ``SandboxResult.enforced``.
+
+        Only the launcher writes the report, just before ``exec``, so a payload
+        cannot claim protections it lacks. No report, or exit 125 (the launcher's
+        failure code), means nothing is claimed: a payload that exits 125 itself
+        only makes the report more cautious, never less.
+        """
+        applied = set(reported.split(",")) - {""}
+        if result.returncode == 125:
+            applied = set()
+        reached = bool(applied)
+        return {
+            "network_isolated": reached,
+            "readonly_fs": "readonly_fs" in applied,
+            "no_capabilities": "no_capabilities" in applied,
+            "seccomp": "seccomp" in applied,
+            "memory_cap": reached and self.limits.memory_mb > 0,
+        }
 
 
 def build_sandbox(kind: str, scratch: str | Path, **kwargs) -> Sandbox:

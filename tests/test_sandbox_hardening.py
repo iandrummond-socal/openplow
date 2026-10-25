@@ -11,6 +11,7 @@ from __future__ import annotations
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,8 @@ def test_mountinfo_unescape_and_within():
 
 # ---- memory cap -----------------------------------------------------------
 
+@pytest.mark.skipif(sys.platform == "darwin",
+                    reason="macOS does not enforce RLIMIT_DATA; the cap is Linux-only")
 def test_memory_cap_stops_a_large_allocation(tmp_path: Path):
     sb = StubSandbox(tmp_path / "sb", timeout=20, limits=Limits(cpu_seconds=20, memory_mb=256))
     res = sb.run([sys.executable, "-c", "x = bytearray(900 * 1024 * 1024); print('alloc')"])
@@ -213,7 +216,7 @@ def test_unshare_fails_closed_when_setup_fails(tmp_path: Path):
     argv = sb._wrap([sys.executable, "-c", f"open({str(marker)!r}, 'w')"])
     argv[argv.index("--rw") + 1] = str(tmp_path / "does-not-exist")
     res = subprocess.run(argv, check=False, capture_output=True, text=True)
-    assert res.returncode == 126 and "openplow sandbox" in res.stderr
+    assert res.returncode == 125 and "openplow sandbox" in res.stderr
     assert not marker.exists()
 
 
@@ -234,3 +237,69 @@ def test_poc_runs_in_hardened_sandbox_and_flags_tampering(tmp_path: Path):
     assert not run.demonstrated
     assert "Read-only file system" in run.output  # blocked outright, not just detected
     assert run.integrity_ok
+
+
+@needs_unshare
+def test_enforced_reports_every_protection_on_a_normal_run(tmp_path: Path):
+    res = _py(UnshareSandbox(tmp_path / "scratch", timeout=20), "print('hi')")
+    assert res.returncode == 0, res.stderr
+    assert res.enforced == {"network_isolated": True, "readonly_fs": True,
+                            "no_capabilities": True, "seccomp": True, "memory_cap": True}
+
+
+@needs_unshare
+def test_enforced_is_honest_when_a_protection_is_off(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20, seccomp=False)
+    res = _py(sb, "print('hi')")
+    assert res.returncode == 0, res.stderr
+    assert res.enforced["seccomp"] is False and res.enforced["readonly_fs"] is True
+
+
+@needs_unshare
+def test_enforced_is_all_false_when_the_launcher_fails(tmp_path: Path):
+    class Broken(UnshareSandbox):
+        def _wrap(self, argv, cwd=None, status_fd=None):
+            out = super()._wrap(argv, cwd, status_fd)
+            out[out.index("--rw") + 1] = str(tmp_path / "does-not-exist")
+            return out
+
+    res = _py(Broken(tmp_path / "scratch", timeout=20), "print('ran')")
+    assert res.returncode == 125 and "openplow sandbox" in res.stderr
+    assert "ran" not in res.stdout
+    assert res.enforced and not any(res.enforced.values())
+
+
+@needs_unshare
+def test_payload_cannot_forge_the_status_report(tmp_path: Path):
+    # The report fd is closed on exec: the payload finds nothing to write to.
+    code = ("import os\n"
+            "for fd in range(3, 64):\n"
+            "    try: os.write(fd, b'readonly_fs,no_capabilities,seccomp')\n"
+            "    except OSError: pass\n"
+            "raise SystemExit(125)\n")
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20)
+    res = _py(sb, code)
+    assert res.returncode == 125
+    assert not any(res.enforced.values())  # cautious, never more generous
+
+
+def test_stub_sandbox_claims_nothing(tmp_path: Path):
+    res = StubSandbox(tmp_path / "sb", timeout=20).run([sys.executable, "-c", "pass"])
+    assert res.enforced == {}
+
+
+@needs_unshare
+def test_timed_out_payload_leaves_no_running_children(tmp_path: Path):
+    ticks = tmp_path / "scratch" / "ticks"
+    code = ("import os, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import os, time\\n"
+            "while True:\\n"
+            "    open(os.environ[\"TMPDIR\"] + \"/ticks\", \"a\").write(\"x\")\\n"
+            "    time.sleep(0.1)'])\n"
+            "time.sleep(60)\n")
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=2)
+    res = _py(sb, code)
+    assert res.timed_out
+    size = ticks.stat().st_size
+    time.sleep(1)
+    assert ticks.stat().st_size == size  # the child stopped with its parent

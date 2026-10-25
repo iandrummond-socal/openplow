@@ -17,8 +17,13 @@ namespaces are set up, and the filter would block ``unshare`` and ``mount``
 themselves. The file uses only the standard library and is run with ``-I`` so a
 planted module in the target directory cannot be imported.
 
-Any failure to apply a step exits 126 instead of running the payload with a
-weaker sandbox than the caller asked for.
+Any failure to apply a step exits 125 instead of running the payload with a
+weaker sandbox than the caller asked for (125, because a shell uses 126 and 127
+for "cannot execute" and "not found").
+
+``--status-fd N`` names a pipe the parent reads to learn which steps were
+applied. The launcher writes the list just before ``exec`` and closes the fd on
+exec, so the payload never holds it and cannot forge a report.
 """
 
 from __future__ import annotations
@@ -176,7 +181,7 @@ def _libc() -> ctypes.CDLL:
 
 def _fail(msg: str) -> None:
     sys.stderr.write(f"openplow sandbox: {msg}\n")
-    sys.exit(126)
+    sys.exit(125)
 
 
 def _mount(libc, source, target, fstype, flags) -> None:
@@ -273,6 +278,7 @@ def apply_seccomp() -> None:
 def main(argv: list[str]) -> None:
     rw: list[str] = []
     ro: list[str] = []
+    status_fd: int | None = None
     readonly = seccomp = True
     i = 0
     while i < len(argv) and argv[i] != "--":
@@ -281,6 +287,9 @@ def main(argv: list[str]) -> None:
             i += 2
         elif argv[i] == "--ro":
             ro.append(argv[i + 1])
+            i += 2
+        elif argv[i] == "--status-fd":
+            status_fd = int(argv[i + 1])
             i += 2
         elif argv[i] == "--no-readonly":
             readonly = False
@@ -294,15 +303,22 @@ def main(argv: list[str]) -> None:
     if not command:
         _fail("no command given")
 
+    applied: list[str] = []
     if readonly:
         cwd = os.getcwd()
         make_readonly(rw, ro)
+        applied.append("readonly_fs")
         # The working directory still points at the pre-bind mount; re-enter it by
         # path so relative writes land on the writable bind.
         os.chdir(cwd)
     drop_capabilities()
+    applied.append("no_capabilities")
     if seccomp:
         apply_seccomp()
+        applied.append("seccomp")
+    if status_fd is not None:
+        os.set_inheritable(status_fd, False)  # closed by exec: the payload never sees it
+        os.write(status_fd, ",".join(applied).encode())
     try:
         os.execvp(command[0], command)
     except OSError as exc:
