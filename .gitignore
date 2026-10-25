@@ -26,3 +26,6 @@ openplow-benchmarks/
 .vscode/
 .idea/
 .DS_Store
+
+# uv writes this when it runs in the project; openplow installs with pip, so nothing reads it
+uv.lock
