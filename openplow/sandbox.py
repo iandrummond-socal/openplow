@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +61,14 @@ class Limits:
     address_space_mb: int = 0
 
 
+def _nproc_capped(platform: str | None = None) -> bool:
+    """Whether RLIMIT_NPROC is applied. macOS counts every process the user owns
+    against it, not just the sandbox's, so a cap of 64 stops any child from
+    forking (even a PoC's shell) on a normal desktop session. It stays on
+    elsewhere, where it is scoped by the namespace or the container."""
+    return (platform or sys.platform) != "darwin"
+
+
 def _make_preexec(limits: Limits):
     """Build a preexec_fn that puts the child in its own session and applies
     rlimits before exec. Returns None where rlimits are unavailable."""
@@ -70,7 +79,8 @@ def _make_preexec(limits: Limits):
         os.setsid()  # detach from the parent's controlling terminal / group
         _set(resource.RLIMIT_CPU, limits.cpu_seconds)
         _set(resource.RLIMIT_FSIZE, limits.file_size_mb * 1024 * 1024)
-        _set(resource.RLIMIT_NPROC, limits.max_procs)
+        if _nproc_capped():
+            _set(resource.RLIMIT_NPROC, limits.max_procs)
         _set(resource.RLIMIT_CORE, 0)  # no core dumps
         if limits.address_space_mb > 0:
             _set(resource.RLIMIT_AS, limits.address_space_mb * 1024 * 1024)

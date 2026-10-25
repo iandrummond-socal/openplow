@@ -196,6 +196,22 @@ def test_poc_tampering_detected(tmp_path, target_repo):
     assert run.attempted and not run.integrity_ok and not run.demonstrated
 
 
+def test_poc_can_spawn_a_shell(tmp_path, target_repo):
+    # Regression: a 64-process cap counted every process the user owns on macOS,
+    # so no PoC could start a shell and command-injection PoCs never reproduced.
+    finding = {"poc": {"kind": "script", "content":
+                       "import subprocess; subprocess.run('true', shell=True, check=True); "
+                       "print('SPAWNED')\n", "observed": "SPAWNED"}}
+    run = poc_mod.run_poc(_sandbox(tmp_path), target_repo, finding, tmp_path / "w")
+    assert run.attempted and run.demonstrated
+
+
+def test_nproc_cap_skipped_only_on_macos():
+    from openplow.sandbox import _nproc_capped
+    assert not _nproc_capped("darwin")
+    assert _nproc_capped("linux")
+
+
 def test_poc_input_kind_not_executed(tmp_path, target_repo):
     finding = {"poc": {"kind": "input", "content": "x"}}
     run = poc_mod.run_poc(_sandbox(tmp_path), target_repo, finding, tmp_path / "w")
