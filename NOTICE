@@ -11,3 +11,24 @@ This product includes and is derived in part from the Cloudflare
 The attack-class prompts, finding schema, and audit methodology are adapted
 from that project. Its MIT license notice is retained in skills/ where its
 files are vendored.
+
+----
+
+The upstream CVE benchmark targets under benchmarks/upstream/targets/ are
+derived from third-party projects, used here as known-vulnerable fixtures.
+Each is the project's own source at the commit *before* the fix, with the
+package and identifying strings renamed so the finder cannot recognize the
+project and recall the advisory. The code logic is unchanged. Both are MIT
+licensed; their copyright notices are retained below.
+
+archive-tree/ziptree  —  from zipp (CompleteDirs path handling)
+    https://github.com/jaraco/zipp   pre-fix commit 3cb5609 (fix f89b93f)
+    Infinite loop on names with repeated leading separators (ref
+    python/cpython#123270 / CVE-2024-8088).
+    Copyright (c) Jason R. Coombs. Licensed under the MIT License.
+
+token-verify/tokenlib  —  from PyJWT (HMAC key handling)
+    https://github.com/jpadilla/pyjwt   pre-fix commit 24b29ad (fix 9c52867)
+    Public key accepted as an HMAC secret, enabling token forgery
+    (GHSA-ffqj-6fqr-9h24 / CVE-2022-29217).
+    Copyright (c) 2015-2022 José Padilla. Licensed under the MIT License.

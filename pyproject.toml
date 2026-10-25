@@ -26,8 +26,12 @@ dependencies = []
 anthropic = ["anthropic>=0.40.0"]
 # Full JSON-schema validation of findings; without it a minimal check is used.
 schema = ["jsonschema>=4.0"]
+# Runtime deps of the upstream benchmark targets (e.g. the JWT target needs a
+# crypto library to import). Needed to run benchmarks/upstream, not the harness.
+benchmarks = ["cryptography>=3.4"]
 # ruff is pinned so a new release cannot change the lint rules under CI.
-dev = ["pytest>=8.0", "ruff==0.17.2", "jsonschema>=4.0"]
+# cryptography is included so CI exercises the upstream benchmark targets.
+dev = ["pytest>=8.0", "ruff==0.17.2", "jsonschema>=4.0", "cryptography>=3.4"]
 
 [project.scripts]
 openplow = "openplow.cli:main"

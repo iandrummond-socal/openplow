@@ -45,7 +45,7 @@ Components 9–13 plus an evaluation suite.
 - [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
 - [ ] More gapfill rounds driven by a coverage metric rather than a fixed cap
 - [x] Decoy targets: CVE look-alikes with no bug; confirmed findings on them are scored as false positives (`benchmarks/decoys/`, `"decoy": true` in a spec)
-- [ ] Add upstream CVE-fix targets (check out the pre-fix commit) alongside the reproductions
+- [x] Add upstream CVE-fix targets (check out the pre-fix commit) alongside the reproductions: `benchmarks/upstream/` (zipp DoS CVE-2024-8088, PyJWT key confusion CVE-2022-29217), renamed so the finder cannot recall the advisory; PoCs + fixes pass the gate
 - [x] Prompt caching: class file moved into the cached system prefix, plus automatic caching of the tool-loop conversation (`models.AnthropicAdapter`)
 - [x] Spending cap: `--max-cost` / `OPENPLOW_MAX_COST`, one budget shared by finder, validator and all benchmark targets; checked before every API call (`pricing.Budget`)
 
