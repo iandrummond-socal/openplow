@@ -124,3 +124,23 @@ def test_rehunt_skips_existing_finding_id(ctx: RunContext):
     assert result["findings"] == 0
     stored = [f for f in ctx.store.findings("run-x") if f["id"] == "dup"]
     assert stored[0]["verdict"] == "rejected"  # preserved
+
+
+def test_dedup_folds_same_cwe_across_classes_and_boundaries():
+    a = _finding("a", cls="client-side", weakness="CWE-22: Path Traversal")
+    a["threat_model"]["boundary"] = "archive -> host filesystem"
+    b = _finding("b", cls="cloud-and-deployment", weakness="CWE-22 (Zip Slip) / CWE-59")
+    b["threat_model"]["boundary"] = "untrusted entry names escape dest"
+    assert dedup.dedup_key(a) == dedup.dedup_key(b)
+
+
+def test_dedup_keeps_different_cwe_in_same_function_apart():
+    traversal = _finding("t", weakness="CWE-22 Path Traversal")
+    bomb = _finding("z", weakness="CWE-409: Improper Handling of Highly Compressed Data")
+    assert dedup.dedup_key(traversal) != dedup.dedup_key(bomb)
+
+
+def test_dedup_falls_back_to_title_then_class():
+    by_title = _finding("t", title="SQL injection (cwe-89) in login")
+    assert dedup.dedup_key(by_title) == dedup.dedup_key(_finding("w", weakness="CWE-89"))
+    assert dedup.dedup_key(_finding("x", cls="c1")) != dedup.dedup_key(_finding("y", cls="c2"))
