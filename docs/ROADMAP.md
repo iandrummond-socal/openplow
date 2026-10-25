@@ -43,6 +43,7 @@ Components 9–13 plus an evaluation suite.
 - [x] Real-model run wired up: `AnthropicAdapter` with effort + usage capture, `MeteredAdapter`, `pricing.py` cost estimation, `scripts/run_real.sh` one-command runner with preflight; run and benchmark print estimated cost
 - [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
 - [ ] More gapfill rounds driven by a coverage metric rather than a fixed cap
+- [x] Decoy targets: CVE look-alikes with no bug; confirmed findings on them are scored as false positives (`benchmarks/decoys/`, `"decoy": true` in a spec)
 - [ ] Add upstream CVE-fix targets (check out the pre-fix commit) alongside the reproductions
 - [x] Prompt caching: class file moved into the cached system prefix, plus automatic caching of the tool-loop conversation (`models.AnthropicAdapter`)
 - [x] Spending cap: `--max-cost` / `OPENPLOW_MAX_COST`, one budget shared by finder, validator and all benchmark targets; checked before every API call (`pricing.Budget`)

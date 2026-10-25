@@ -11,6 +11,11 @@ manifests.
 - `cve/` — four targets reproducing real advisories (CVE-2007-4559 tarfile
   traversal, Zip Slip, SQL injection, OS command injection), each with a working
   PoC and the real fix. See [`cve/README.md`](cve/README.md).
+- `decoys/` — four look-alikes of the CVE targets with no bug, marked
+  `"decoy": true`; anything confirmed on them is a false positive. See
+  [`decoys/README.md`](decoys/README.md).
+- `cve-and-decoys.json` — both suites in one run, so one report shows recall
+  and false positives together.
 
 ## Run the sample
 

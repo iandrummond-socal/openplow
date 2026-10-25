@@ -17,6 +17,10 @@ verifies the shipped fix with the fail→pass patch gate.
 | `sqli-sqlite` | CWE-89 (representative of many CVEs) | user input string-formatted into SQL → auth bypass | parameterized query |
 | `cmd-injection` | CWE-78 (representative of many CVEs) | host interpolated into a `shell=True` command → RCE | pass an argv list, no shell |
 
+For false positives, see the [decoy benchmark](../decoys/README.md): the same
+four shapes with no bug, scored separately. `benchmarks/cve-and-decoys.json`
+runs both suites in one report.
+
 ## Run it
 
 Deterministic, no API key (the `fixture` adapter replays the findings + PoCs +

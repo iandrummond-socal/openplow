@@ -104,7 +104,9 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     t = report.totals
     print(f"recall={t['recall']:.0%} confirmed_recall={t['confirmed_recall']:.0%} "
           f"rejection_rate={t['rejection_rate']:.0%} "
-          f"unmatched_confirmed={t['unmatched_confirmed']}")
+          f"unmatched_confirmed={t['unmatched_confirmed']}"
+          + (f" decoys_clean={t['decoys_clean']}/{t['decoy_targets']} "
+             f"false_positives={t['false_positives']}" if t.get("decoy_targets") else ""))
     cost_note = "" if t.get("cost_fully_priced", True) else " (some models unpriced)"
     print(f"estimated cost: ${t.get('estimated_cost_usd', 0.0):.4f}{cost_note}")
     if t.get("cap_reached"):

