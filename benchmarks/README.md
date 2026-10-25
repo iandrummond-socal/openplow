@@ -85,3 +85,19 @@ fix), deliberately vulnerable apps, and OSS-Fuzz reproducers.
 Recall is not recall against *all* bugs — no such labeled set exists. It
 measures only the bugs the manifest knows about. Use the rejection rate and the
 coverage signal (Gapfill, later) to reason about completeness.
+
+## Re-score a saved run (free)
+
+A benchmark run keeps its findings in `<out>/bench-<target>-<id>/findings.json`
+and its token usage in `<out>/benchmark.sqlite`. After changing the dedup key or
+the scoring rules, re-score an old run instead of paying for a new one:
+
+```bash
+openplow rescore openplow-benchmarks --spec benchmarks/cve/benchmark.json
+```
+
+No model is called and no PoC or patch is run: verdicts, PoC results and
+fix-gate results are taken as recorded, and duplicates are re-folded with the
+current dedup key. The report goes to `<out>/rescore/` (or `--out DIR`); the
+original report is left untouched. Targets in the spec with no run in the
+directory are listed as not scored.
