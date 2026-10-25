@@ -20,7 +20,7 @@ import hashlib
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,8 @@ class PocRun:
     returncode: int | None = None
     output: str = ""
     reason: str = ""
+    # Which sandbox protections were active for this run (``SandboxResult.enforced``).
+    enforced: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -123,16 +125,16 @@ def _prepare_target(repo: Path, workdir: Path, poc: dict[str, Any]) -> tuple[Pat
 
 
 def _demonstrates(sandbox: Sandbox, target: Path, poc_path: Path,
-                  poc: dict[str, Any]) -> tuple[bool, str, int | None, bool]:
-    """Run the PoC once. Returns (demonstrated, output, returncode, timed_out)."""
+                  poc: dict[str, Any]) -> tuple[bool, str, int | None, bool, dict[str, bool]]:
+    """Run the PoC once. Returns (demonstrated, output, returncode, timed_out, enforced)."""
     runner = _RUNNERS.get(poc_path.suffix)
     if runner is None or shutil.which(runner[0]) is None:
-        return False, f"no runtime for {poc_path.suffix}", None, False
+        return False, f"no runtime for {poc_path.suffix}", None, False, {}
     result = sandbox.run([*runner, poc_path.name], cwd=target)
     output = (result.stdout + result.stderr)[-4000:]
     observed = poc.get("observed")
     demonstrated = result.returncode == 0 and (observed is None or observed in output)
-    return demonstrated, output, result.returncode, result.timed_out
+    return demonstrated, output, result.returncode, result.timed_out, result.enforced
 
 
 def run_poc(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
@@ -151,7 +153,7 @@ def run_poc(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
         return PocRun(attempted=False, reason=f"runtime {runner[0]!r} not available")
 
     before = _snapshot(target, exclude={poc_path})
-    demonstrated, output, rc, timed_out = _demonstrates(sandbox, target, poc_path, poc)
+    demonstrated, output, rc, timed_out, enforced = _demonstrates(sandbox, target, poc_path, poc)
     integrity_ok = not _tampered(target, before, exclude={poc_path})
 
     reason = ""
@@ -164,7 +166,7 @@ def run_poc(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
         reason = f"PoC did not reproduce (exit {rc})"
 
     return PocRun(attempted=True, demonstrated=demonstrated, integrity_ok=integrity_ok,
-                  returncode=rc, output=output, reason=reason)
+                  returncode=rc, output=output, reason=reason, enforced=enforced)
 
 
 # ---- patch application --------------------------------------------------
@@ -292,7 +294,7 @@ def run_patch_gate(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
     if runner is None or shutil.which(runner[0]) is None:
         return PatchGate(attempted=False, reason=f"no runtime for {pb.suffix}")
 
-    before, _, _, _ = _demonstrates(sandbox, tb, pb, poc)
+    before, *_ = _demonstrates(sandbox, tb, pb, poc)
     if not before:
         return PatchGate(attempted=True, reproduced_before=False,
                          reason="PoC did not reproduce before patch")
@@ -304,7 +306,7 @@ def run_patch_gate(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
         return PatchGate(attempted=True, reproduced_before=True, patch_applied=False,
                          reason=f"patch did not apply: {areason}")
 
-    after, _, _, _ = _demonstrates(sandbox, ta, pa, poc)
+    after, *_ = _demonstrates(sandbox, ta, pa, poc)
     passed = not after
     reason = "fail->pass flip verified" if passed else "PoC still reproduces after patch"
     return PatchGate(attempted=True, reproduced_before=True, patch_applied=True,

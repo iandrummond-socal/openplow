@@ -303,3 +303,24 @@ def test_timed_out_payload_leaves_no_running_children(tmp_path: Path):
     size = ticks.stat().st_size
     time.sleep(1)
     assert ticks.stat().st_size == size  # the child stopped with its parent
+
+
+def test_poc_run_on_the_stub_claims_no_protections(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    finding = {"poc": {"kind": "script", "content": "print('PWNED')\n", "observed": "PWNED"}}
+    run = poc_mod.run_poc(StubSandbox(tmp_path / "sb", timeout=20), repo, finding,
+                          tmp_path / "sb" / "f")
+    assert run.demonstrated and run.enforced == {}
+
+
+@needs_unshare
+def test_poc_run_reports_the_protections_that_ran(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    finding = {"poc": {"kind": "script", "content": "print('PWNED')\n", "observed": "PWNED"}}
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20)
+    run = poc_mod.run_poc(sb, repo, finding, tmp_path / "scratch" / "f")
+    assert run.demonstrated, run.output
+    assert run.enforced["readonly_fs"] and run.enforced["seccomp"]
+    assert run.enforced["no_capabilities"] and run.enforced["network_isolated"]
