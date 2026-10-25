@@ -65,10 +65,20 @@ class ModelAdapter(ABC):
     #: Human-readable name recorded in finding provenance.
     name: str = "abstract"
 
+    #: Whether :meth:`complete_with_tools` actually lets the model call tools.
+    supports_tools: bool = False
+
     @abstractmethod
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
         """Turn a prompt into text, classifying how the call went."""
         raise NotImplementedError
+
+    def complete_with_tools(self, system: str, prompt: str, tools: Any, *,
+                            max_tokens: int = 4096, max_rounds: int = 30) -> ModelResponse:
+        """Like :meth:`complete`, but the model may call ``tools`` (an object with
+        ``specs()`` and ``call(name, args)``, e.g. :class:`~openplow.repo_tools.RepoTools`)
+        before answering. Adapters without tool support ignore the tools."""
+        return self.complete(system, prompt, max_tokens=max_tokens)
 
 
 class StubAdapter(ModelAdapter):
@@ -91,6 +101,8 @@ class AnthropicAdapter(ModelAdapter):
     Lazily imports ``anthropic`` so the base install stays dependency-free.
     Install with ``pip install 'openplow[anthropic]'``.
     """
+
+    supports_tools = True
 
     def __init__(self, model: str, api_key: str | None = None, *, name: str | None = None,
                  effort: str | None = "high"):
@@ -138,6 +150,95 @@ class AnthropicAdapter(ModelAdapter):
             })
         except Exception as exc:  # noqa: BLE001 - adapter boundary
             return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc))
+
+    def complete_with_tools(self, system: str, prompt: str, tools: Any, *,
+                            max_tokens: int = 4096, max_rounds: int = 30) -> ModelResponse:
+        """Manual tool-use loop: run each requested tool locally and feed the
+        results back until the model answers. After ``max_rounds`` tool rounds
+        the model is told to answer and tools are switched off for the last call.
+
+        ``raw`` carries a per-turn ``transcript`` (text, tool calls, truncated
+        tool results, stop reason) so a miss can be diagnosed afterwards, plus
+        summed ``usage`` and the per-call ``turn_usages`` for metering.
+        """
+        specs = tools.specs()
+        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+        transcript: list[dict[str, Any]] = []
+        turn_usages: list[dict[str, int]] = []
+        tool_rounds = 0
+        final_call = False
+        try:
+            client = self._ensure_client()
+            while True:
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "system": system,
+                    "messages": messages,
+                    "tools": specs,
+                }
+                if final_call:
+                    kwargs["tool_choice"] = {"type": "none"}
+                if self.effort:
+                    kwargs["output_config"] = {"effort": self.effort}
+                msg = client.messages.create(**kwargs)
+                turn_usages.append(_extract_usage(msg))
+                stop = getattr(msg, "stop_reason", None)
+                text = "".join(b.text for b in msg.content
+                               if getattr(b, "type", None) == "text")
+                calls = [b for b in msg.content if getattr(b, "type", None) == "tool_use"]
+                turn: dict[str, Any] = {"stop_reason": stop, "text": text,
+                                        "tool_calls": [{"name": c.name, "input": c.input}
+                                                       for c in calls]}
+                transcript.append(turn)
+                # Pass the assistant content back unchanged (thinking blocks included).
+                messages.append({"role": "assistant", "content": msg.content})
+
+                if stop == "pause_turn":
+                    continue
+                if stop != "tool_use" or not calls:
+                    break
+
+                results: list[dict[str, Any]] = []
+                turn["tool_results"] = []
+                for c in calls:
+                    try:
+                        out, is_error = tools.call(c.name, c.input), False
+                    except Exception as exc:  # noqa: BLE001 - reported to the model
+                        out, is_error = f"error: {exc}", True
+                    results.append({"type": "tool_result", "tool_use_id": c.id,
+                                    "content": out, "is_error": is_error})
+                    turn["tool_results"].append(
+                        {"name": c.name, "is_error": is_error,
+                         "content": out if len(out) <= 2000 else out[:2000] + "...(truncated)"})
+                tool_rounds += 1
+                if tool_rounds >= max_rounds:
+                    final_call = True
+                    results.append({"type": "text", "text": (
+                        "Tool budget exhausted. Give your final answer now, in the "
+                        "required format, from what you have read.")})
+                messages.append({"role": "user", "content": results})
+
+            return ModelResponse(outcome=classify_body(text), text=text, raw={
+                "stop_reason": stop,
+                "model": self.model,
+                "usage": _sum_usage(turn_usages),
+                "turn_usages": turn_usages,
+                "tool_rounds": tool_rounds,
+                "transcript": transcript,
+            })
+        except Exception as exc:  # noqa: BLE001 - adapter boundary
+            return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc),
+                                 raw={"model": self.model, "usage": _sum_usage(turn_usages),
+                                      "turn_usages": turn_usages, "transcript": transcript})
+
+
+def _sum_usage(usages: list[dict[str, int]]) -> dict[str, int]:
+    total: dict[str, int] = {}
+    for u in usages:
+        for k, v in u.items():
+            total[k] = total.get(k, 0) + v
+    return total
 
 
 def _extract_usage(msg: Any) -> dict[str, int]:
@@ -224,19 +325,37 @@ class MeteredAdapter(ModelAdapter):
     def model(self) -> str:
         return getattr(self.inner, "model", self.inner.name)
 
+    @property
+    def supports_tools(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_tools
+
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
         resp = self.inner.complete(system, prompt, max_tokens=max_tokens)
-        usage = (resp.raw or {}).get("usage") or {}
-        if usage:
+        self._record(resp)
+        return resp
+
+    def complete_with_tools(self, system: str, prompt: str, tools: Any, *,
+                            max_tokens: int = 4096, max_rounds: int = 30) -> ModelResponse:
+        resp = self.inner.complete_with_tools(system, prompt, tools, max_tokens=max_tokens,
+                                              max_rounds=max_rounds)
+        self._record(resp)
+        return resp
+
+    def _record(self, resp: ModelResponse) -> None:
+        raw = resp.raw or {}
+        # A tool loop makes several API calls; record each so "calls" stays honest.
+        usages = raw.get("turn_usages") or ([raw["usage"]] if raw.get("usage") else [])
+        for usage in usages:
+            if not usage:
+                continue
             self._store.add_usage(
                 self._run_id, self._repo, self._role,
-                (resp.raw or {}).get("model", self.model),
+                raw.get("model", self.model),
                 int(usage.get("input_tokens", 0)),
                 int(usage.get("output_tokens", 0)),
                 int(usage.get("cache_read_tokens", 0)),
                 int(usage.get("cache_creation_tokens", 0)),
             )
-        return resp
 
 
 # Registry so the CLI can select an adapter by a short name.

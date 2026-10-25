@@ -7,6 +7,13 @@ untouched code, and a proposed patch — or it is not filed.
 
 The prompt is assembled from the matching class file in the vendored skill plus
 the recon context (architecture.md) and a listing of the target area's files.
+A finder that supports tool use also gets read-only ``list_files`` /
+``read_file`` / ``grep`` tools over the checkout, so it can read the code it is
+hunting in rather than guess from file names.
+
+Every hunter call's raw output (prompt, final text, per-turn tool calls, stop
+reason, what was parsed and dropped) is written to
+``<out>/transcripts/hunt/<cell>.json`` so a miss can be diagnosed afterwards.
 Model output is parsed and schema-checked before anything is persisted; a
 finding that does not parse or is missing required fields is dropped and logged
 to the wishlist rather than stored half-formed.
@@ -21,6 +28,8 @@ full producer/consumer loop still runs.
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +37,20 @@ from .. import findings as findings_mod
 from .. import skill_loader
 from ..context import RunContext
 from ..models import Outcome
+from ..repo_tools import RepoTools
 
 # How much of the class file and architecture to inject, to keep context small.
 _CLASS_PROMPT_CHARS = 8000
 _ARCH_CHARS = 4000
 _MAX_FILES_LISTED = 60
+# Tool rounds a hunter may spend reading code before it must answer.
+_MAX_TOOL_ROUNDS = 30
+
+_TOOLS_NOTE = (
+    "\n\nYou have read-only tools over the target repository: list_files, read_file "
+    "and grep (paths relative to the repo root). Read the code before you judge it, "
+    "and ground every finding's location in lines you actually read."
+)
 
 _SRC_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".go", ".rs", ".c", ".cc", ".cpp",
                  ".h", ".hpp", ".java", ".rb", ".php", ".lua", ".sh"}
@@ -65,7 +83,7 @@ def _area_files(repo: Path, area: str) -> list[str]:
 
 
 def _build_prompt(ctx: RunContext, area: str, attack_class: str,
-                  depth: int = 1) -> tuple[str, str]:
+                  depth: int = 1, *, tools: bool = False) -> tuple[str, str]:
     """Assemble (system, prompt) for a hunter from the skill + recon context."""
     class_prompt = skill_loader.load_class_prompt(attack_class)
     if class_prompt is None:
@@ -90,7 +108,7 @@ def _build_prompt(ctx: RunContext, area: str, attack_class: str,
             "nothing. Look harder and from a different angle — chained or multi-step "
             "paths, edge cases, and assumptions the obvious review would skip."
         )
-    return _SYSTEM, prompt
+    return (_SYSTEM + _TOOLS_NOTE if tools else _SYSTEM), prompt
 
 
 def _parse_findings(text: str) -> list[dict[str, Any]]:
@@ -104,8 +122,22 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     attack_class = payload.get("attack_class", "unknown")
     depth = int(payload.get("depth", 1))
 
-    system, prompt = _build_prompt(ctx, area, attack_class, depth)
-    resp = ctx.finder.complete(system, prompt, max_tokens=8192)
+    use_tools = ctx.finder.supports_tools
+    system, prompt = _build_prompt(ctx, area, attack_class, depth, tools=use_tools)
+    if use_tools:
+        resp = ctx.finder.complete_with_tools(system, prompt, RepoTools(ctx.repo),
+                                              max_tokens=8192, max_rounds=_MAX_TOOL_ROUNDS)
+    else:
+        resp = ctx.finder.complete(system, prompt, max_tokens=8192)
+
+    record: dict[str, Any] = {
+        "task": payload, "finder": ctx.finder.name, "outcome": resp.outcome.value,
+        "error": resp.error, "stop_reason": (resp.raw or {}).get("stop_reason"),
+        "tool_rounds": (resp.raw or {}).get("tool_rounds"),
+        "system": system, "prompt": prompt, "text": resp.text,
+        "transcript": (resp.raw or {}).get("transcript"),
+    }
+    transcript_path = _write_transcript(ctx, area, attack_class, depth, record)
 
     if resp.outcome is Outcome.RETRYABLE:
         # Signal the orchestrator to retry by raising.
@@ -116,6 +148,16 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         return {"area": area, "attack_class": attack_class, "findings": 0, "fatal": True}
 
     parsed = _parse_findings(resp.text)
+    if not parsed and resp.text.strip() and resp.text.strip() != "STUB_OK" \
+            and not _is_empty_answer(resp.text):
+        ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
+                           f"unparseable hunter output on {area}/{attack_class}; "
+                           f"see {transcript_path}")
+    if record["stop_reason"] == "max_tokens":
+        ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
+                           f"hunter output truncated (max_tokens) on {area}/{attack_class}")
+    record["parsed"] = len(parsed)
+    record["drops"] = []
     existing_ids = {f["id"] for f in ctx.store.findings(ctx.run_id)}
     filed = 0
     dropped = 0
@@ -136,6 +178,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         problems = findings_mod.validate_finding(finding)
         if problems:
             dropped += 1
+            record["drops"].append({"id": finding["id"], "problems": problems})
             ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
                                f"dropped malformed finding {finding['id']}: {problems[0]}")
             continue
@@ -145,5 +188,23 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
                            "validate", payload={"finding_id": finding["id"]})
         filed += 1
 
+    record.update(filed=filed, dropped=dropped, skipped=skipped)
+    _write_transcript(ctx, area, attack_class, depth, record)
     return {"area": area, "attack_class": attack_class, "findings": filed,
             "dropped": dropped, "skipped": skipped}
+
+
+def _is_empty_answer(text: str) -> bool:
+    """True when the model explicitly answered with an empty findings array."""
+    body = re.sub(r"```(?:json)?|```", "", text).strip()
+    return body.endswith("[]") and "{" not in body
+
+
+def _write_transcript(ctx: RunContext, area: str, attack_class: str, depth: int,
+                      record: dict[str, Any]) -> Path:
+    """Persist one hunter call's raw output for later diagnosis."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{area}__{attack_class}__d{depth}")
+    path = ctx.out_dir / "transcripts" / "hunt" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+    return path
