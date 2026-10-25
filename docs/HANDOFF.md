@@ -70,7 +70,7 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 
 | Needs | Task |
 | --- | --- |
-| no credits | Sandbox: cgroup-v2 memory cap (roadmap M1; read-only filesystem, capability drop and seccomp are done) |
+| no credits | Sandbox: `systemd-run --user` memory cap for desktop Linux, and an unprivileged-Linux CI job (roadmap M1; read-only target, capability drop, seccomp and the delegated-cgroup cap are done) |
 | ~$2 credit | Decoys-only real run → first false-positive rate |
 | ~$5–6 credit | `benchmarks/cve-and-decoys.json` real run → honest recall and false positives in one report |
 

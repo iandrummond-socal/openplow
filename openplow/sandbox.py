@@ -25,16 +25,19 @@ Under Docker the unshare backend needs
 ``--security-opt seccomp=unconfined --security-opt apparmor=unconfined`` or it
 fails silently. The unshare backend also makes the filesystem read-only (except
 scratch), drops all capabilities and loads a seccomp denylist; see
-:mod:`openplow._sandbox_init`. A cgroup-v2 memory cap is the remaining step (see
-``docs/ROADMAP.md``); until then ``Limits.memory_mb`` caps the data segment.
+:mod:`openplow._sandbox_init`. ``Limits.memory_mb`` caps the data segment
+everywhere and, where a cgroup-v2 subtree with the memory controller is
+delegated to this process, also sets a hard cgroup cap (see :func:`_cgroup_parent`).
 """
 
 from __future__ import annotations
 
+import itertools
 import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +53,8 @@ class SandboxResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    # True when the cgroup memory cap killed the run (``memory.events`` oom_kill).
+    oom_killed: bool = False
     # Which protections were actually active for this run, e.g. ``seccomp: True``.
     # Empty means "none claimed": the stub backend enforces nothing beyond env,
     # timeout and rlimits. Never assume a protection that is not listed here.
@@ -67,9 +72,96 @@ class Limits:
     address_space_mb: int = 0
     # Data-segment cap (RLIMIT_DATA): limits heap and private anonymous memory.
     # Unlike RLIMIT_AS it ignores reserved-but-unused address space, so
-    # interpreters such as Node still start. 0 disables it. This is the memory
-    # cap until a cgroup-v2 cap is added (cgroups need a delegated subtree).
+    # interpreters such as Node still start. 0 disables it. It does not count
+    # shared memory, so where a cgroup is delegated the same number is also set
+    # as a hard cgroup cap (memory.max, no swap).
     memory_mb: int = 0
+
+
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+_leaf_ids = itertools.count()
+_warned_no_cgroup = False
+
+
+def _cgroup_parent(root: Path = _CGROUP_ROOT, proc_cgroup: Path = Path("/proc/self/cgroup")
+                   ) -> Path | None:
+    """A cgroup directory this process may create a memory-capped leaf under, or None.
+
+    OpenPlow never moves other processes or edits a parent's ``subtree_control``:
+    it only uses a place where the memory controller is already delegated and
+    writable. That is this process's own cgroup, or its parent (a sibling leaf),
+    which is how a systemd-delegated scope or a harness that did the delegation
+    looks. On a plain desktop session neither holds and there is no cgroup cap.
+    """
+    try:
+        if not (root / "cgroup.controllers").exists():  # not cgroup v2
+            return None
+        rel = next(line.split(":", 2)[2].strip()
+                   for line in proc_cgroup.read_text().splitlines() if line.startswith("0::"))
+    except (OSError, StopIteration, IndexError):
+        return None
+    own = root / rel.lstrip("/")
+    for candidate in (own, own.parent) if own != root else (own,):
+        try:
+            delegated = "memory" in (candidate / "cgroup.subtree_control").read_text().split()
+        except OSError:
+            continue
+        if delegated and os.access(candidate, os.W_OK):
+            return candidate
+    return None
+
+
+def _make_cgroup_leaf(limits: Limits, parent: Path | None = None) -> Path | None:
+    """Create a memory-capped leaf cgroup, or None (with one warning) if it cannot."""
+    global _warned_no_cgroup
+    parent = parent or _cgroup_parent()
+    leaf = None
+    try:
+        if parent is None:
+            raise OSError("no delegated cgroup with the memory controller")
+        leaf = parent / f"openplow-{os.getpid()}-{next(_leaf_ids)}"
+        leaf.mkdir()
+        (leaf / "memory.max").write_text(str(limits.memory_mb * 1024 * 1024))
+        try:
+            (leaf / "memory.swap.max").write_text("0")
+        except OSError:
+            pass  # swap accounting may be off; memory.max still holds
+        return leaf
+    except OSError as exc:
+        if leaf is not None:
+            _remove_cgroup_leaf(leaf)
+        if not _warned_no_cgroup:
+            _warned_no_cgroup = True
+            sys.stderr.write(f"openplow sandbox: no memory cap from a cgroup ({exc}); "
+                             "only the data-segment limit applies\n")
+        return None
+
+
+def _read_oom_kills(leaf: Path) -> bool:
+    try:
+        for line in (leaf / "memory.events").read_text().splitlines():
+            if line.startswith("oom_kill "):
+                return int(line.split()[1]) > 0
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
+
+
+def _remove_cgroup_leaf(leaf: Path) -> None:
+    """Kill anything left in the leaf, then remove it (a cgroup with live
+    processes cannot be removed)."""
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    for _ in range(50):
+        try:
+            leaf.rmdir()
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.02)
 
 
 def _nproc_capped(platform: str | None = None) -> bool:
@@ -80,14 +172,20 @@ def _nproc_capped(platform: str | None = None) -> bool:
     return (platform or sys.platform) != "darwin"
 
 
-def _make_preexec(limits: Limits):
+def _make_preexec(limits: Limits, cgroup_procs: Path | None = None):
     """Build a preexec_fn that puts the child in its own session and applies
-    rlimits before exec. Returns None where rlimits are unavailable."""
+    rlimits before exec. Returns None where rlimits are unavailable.
+
+    With ``cgroup_procs`` the child first joins that cgroup, so the memory cap
+    covers it from its first instruction."""
     if resource is None:
         return None
 
     def _preexec() -> None:  # pragma: no cover - runs in the child process
         os.setsid()  # detach from the parent's controlling terminal / group
+        if cgroup_procs is not None:
+            with open(cgroup_procs, "w") as procs:
+                procs.write(str(os.getpid()))
         _set(resource.RLIMIT_CPU, limits.cpu_seconds)
         _set(resource.RLIMIT_FSIZE, limits.file_size_mb * 1024 * 1024)
         if _nproc_capped():
@@ -132,7 +230,7 @@ class Sandbox:
         return argv
 
     def _exec(self, argv: list[str], cwd: str | Path | None, *,
-              pass_fds: tuple[int, ...] = ()) -> SandboxResult:
+              pass_fds: tuple[int, ...] = (), cgroup: Path | None = None) -> SandboxResult:
         try:
             proc = subprocess.run(
                 argv,
@@ -142,7 +240,7 @@ class Sandbox:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                preexec_fn=_make_preexec(self.limits),
+                preexec_fn=_make_preexec(self.limits, cgroup / "cgroup.procs" if cgroup else None),
                 pass_fds=pass_fds,
             )
             return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
@@ -229,17 +327,24 @@ class UnshareSandbox(Sandbox):
     def run(self, argv: list[str], *, cwd: str | Path | None = None) -> SandboxResult:
         if not self.available():
             raise RuntimeError("unshare not found; install util-linux or use StubSandbox")
+        leaf = _make_cgroup_leaf(self.limits) if self.limits.memory_mb > 0 else None
         read_fd, write_fd = os.pipe()
         try:
-            result = self._exec(self._wrap(argv, cwd, write_fd), cwd, pass_fds=(write_fd,))
+            result = self._exec(self._wrap(argv, cwd, write_fd), cwd,
+                                pass_fds=(write_fd,), cgroup=leaf)
         finally:
             os.close(write_fd)  # the parent's copy, so the read below sees EOF
+            if leaf is not None:
+                oom = _read_oom_kills(leaf)
+                _remove_cgroup_leaf(leaf)
         with os.fdopen(read_fd, "rb") as status:
             reported = status.read().decode(errors="replace")
-        result.enforced = self._enforced(reported, result)
+        result.enforced = self._enforced(reported, result, capped=leaf is not None)
+        result.oom_killed = leaf is not None and oom
         return result
 
-    def _enforced(self, reported: str, result: SandboxResult) -> dict[str, bool]:
+    def _enforced(self, reported: str, result: SandboxResult, *,
+                  capped: bool = False) -> dict[str, bool]:
         """Turn the launcher's status report into ``SandboxResult.enforced``.
 
         Only the launcher writes the report, just before ``exec``, so a payload
@@ -256,7 +361,10 @@ class UnshareSandbox(Sandbox):
             "readonly_fs": "readonly_fs" in applied,
             "no_capabilities": "no_capabilities" in applied,
             "seccomp": "seccomp" in applied,
-            "memory_cap": reached and self.limits.memory_mb > 0,
+            # heap_limit is the RLIMIT_DATA fallback; memory_cap is the hard cgroup cap
+            # and is False wherever no cgroup was delegated.
+            "heap_limit": reached and self.limits.memory_mb > 0,
+            "memory_cap": reached and capped,
         }
 
 

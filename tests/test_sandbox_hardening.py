@@ -18,6 +18,7 @@ import pytest
 
 from openplow import _sandbox_init as init
 from openplow import poc as poc_mod
+from openplow import sandbox as sandbox_mod
 from openplow.sandbox import Limits, StubSandbox, UnshareSandbox
 
 # ---- seccomp program, checked with a tiny classic-BPF interpreter ---------
@@ -243,8 +244,11 @@ def test_poc_runs_in_hardened_sandbox_and_flags_tampering(tmp_path: Path):
 def test_enforced_reports_every_protection_on_a_normal_run(tmp_path: Path):
     res = _py(UnshareSandbox(tmp_path / "scratch", timeout=20), "print('hi')")
     assert res.returncode == 0, res.stderr
-    assert res.enforced == {"network_isolated": True, "readonly_fs": True,
-                            "no_capabilities": True, "seccomp": True, "memory_cap": True}
+    # memory_cap (the cgroup) depends on the host delegating one; the rest never does.
+    assert {k: v for k, v in res.enforced.items() if k != "memory_cap"} == {
+        "network_isolated": True, "readonly_fs": True, "no_capabilities": True,
+        "seccomp": True, "heap_limit": True}
+    assert res.enforced["memory_cap"] is (sandbox_mod._cgroup_parent() is not None)
 
 
 @needs_unshare
@@ -324,3 +328,107 @@ def test_poc_run_reports_the_protections_that_ran(tmp_path: Path):
     assert run.demonstrated, run.output
     assert run.enforced["readonly_fs"] and run.enforced["seccomp"]
     assert run.enforced["no_capabilities"] and run.enforced["network_isolated"]
+
+
+# ---- cgroup-v2 memory cap --------------------------------------------------
+# These need a delegated cgroup with the memory controller; scripts/test_linux.sh
+# sets one up. Elsewhere they skip, and the honest-fallback tests still run.
+
+needs_cgroup = pytest.mark.skipif(
+    not (_unshare_works() and sandbox_mod._cgroup_parent() is not None),
+    reason="no delegated cgroup with the memory controller")
+
+# A shared mapping is charged to the cgroup but not counted by RLIMIT_DATA, so
+# only the cgroup cap can stop it.
+_BOMB = ("import mmap\n"
+         "m = mmap.mmap(-1, 900 * 1024 * 1024)\n"
+         "for i in range(0, len(m), 4096):\n"
+         "    m[i] = 1\n"
+         "print('survived')\n")
+
+
+def _leaves() -> list[Path]:
+    parent = sandbox_mod._cgroup_parent()
+    return sorted(parent.glob("openplow-*")) if parent else []
+
+
+@needs_cgroup
+def test_cgroup_cap_kills_a_memory_bomb(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=128))
+    start = time.monotonic()
+    res = _py(sb, _BOMB)
+    assert "survived" not in res.stdout and res.returncode != 0
+    assert res.oom_killed and res.enforced["memory_cap"] is True
+    assert time.monotonic() - start < 20
+    assert _leaves() == []
+
+
+@needs_cgroup
+def test_cgroup_cap_leaves_a_normal_payload_alone(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=512))
+    res = _py(sb, "x = bytearray(50 * 1024 * 1024); print('fine')")
+    assert res.returncode == 0 and "fine" in res.stdout, res.stderr
+    assert not res.oom_killed and res.enforced["memory_cap"] is True
+    assert _leaves() == []
+
+
+@needs_cgroup
+def test_cgroup_leaf_is_removed_after_a_timeout(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=2, limits=Limits(memory_mb=512))
+    res = _py(sb, "import time; time.sleep(60)")
+    assert res.timed_out and _leaves() == []
+
+
+@needs_cgroup
+def test_cgroup_cold_start_twin(tmp_path: Path):
+    # First run and a repeat run both get a fresh leaf and clean up.
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=512))
+    for _ in range(2):
+        res = _py(sb, "print('ok')")
+        assert res.returncode == 0 and res.enforced["memory_cap"] is True
+        assert _leaves() == []
+
+
+@needs_unshare
+def test_memory_cap_is_reported_false_when_no_cgroup(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setattr(sandbox_mod, "_cgroup_parent", lambda *a, **k: None)
+    monkeypatch.setattr(sandbox_mod, "_warned_no_cgroup", False)
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20, limits=Limits(memory_mb=512))
+    for _ in range(2):
+        res = _py(sb, "print('ran')")
+        assert res.returncode == 0 and "ran" in res.stdout
+        assert res.enforced["memory_cap"] is False and res.enforced["heap_limit"] is True
+        assert res.oom_killed is False
+    assert capsys.readouterr().err.count("no memory cap from a cgroup") == 1  # warned once
+
+
+@needs_unshare
+def test_no_cgroup_is_made_when_the_cap_is_off(tmp_path: Path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("a cgroup was requested with memory_mb=0")
+    monkeypatch.setattr(sandbox_mod, "_make_cgroup_leaf", boom)
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20, limits=Limits(memory_mb=0))
+    res = _py(sb, "print('ok')")
+    assert res.returncode == 0
+    assert res.enforced["memory_cap"] is False and res.enforced["heap_limit"] is False
+
+
+def test_cgroup_parent_picks_a_delegated_writable_cgroup(tmp_path: Path):
+    root = tmp_path / "cg"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "cgroup.controllers").write_text("memory\n")
+    proc = tmp_path / "proc_cgroup"
+    proc.write_text("0::/a/b\n")
+    # Neither /a/b nor /a delegates memory: no cap.
+    (root / "a" / "b" / "cgroup.subtree_control").write_text("")
+    (root / "a" / "cgroup.subtree_control").write_text("cpu\n")
+    assert sandbox_mod._cgroup_parent(root, proc) is None
+    # The parent delegates memory: a sibling leaf under it is fine.
+    (root / "a" / "cgroup.subtree_control").write_text("cpu memory\n")
+    assert sandbox_mod._cgroup_parent(root, proc) == root / "a"
+    # Its own delegation wins.
+    (root / "a" / "b" / "cgroup.subtree_control").write_text("memory\n")
+    assert sandbox_mod._cgroup_parent(root, proc) == root / "a" / "b"
+    # Not cgroup v2 (no cgroup.controllers): no cap.
+    (root / "cgroup.controllers").unlink()
+    assert sandbox_mod._cgroup_parent(root, proc) is None
