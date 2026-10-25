@@ -70,14 +70,20 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 
 | Needs | Task |
 | --- | --- |
-| no credits | Sandbox: hide `/run`, `/tmp` and `/var/run` (planned as checkpoint 2, skipped; until it lands, `allow_unix_sockets=True` leaves host sockets there reachable) |
 | no credits | Sandbox bug: as a non-root user `> /dev/null` fails (EACCES on `open(O_CREAT)` of a minimal-`/dev` node); root is fine. Caused by `minimal_dev` (passes with `minimal_dev=False`). `tests/test_sandbox_isolation.py::test_dev_null_can_be_redirected_to` is a strict xfail for non-root: when it is fixed the test XPASSes and fails the run until the marker is removed |
-| no credits | Sandbox: minimal read-only root (hide `$HOME` reads), `systemd-run --user` memory cap for desktop Linux, a non-privileged Linux CI job, loopback networking, runtime verification on x86_64 (roadmap M1) |
+| no credits | Sandbox: `systemd-run --user` memory cap for desktop Linux, a non-privileged Linux CI job, loopback networking, runtime verification on x86_64 (roadmap M1) |
 
 Sandbox state: done on Linux are the read-only target, capability drop, seccomp,
 the delegated-cgroup cap, a minimal `/dev`, read-only `/proc` kernel controls, and
-`socket(AF_UNIX)` refused by default (`socketpair` still allowed). `enforced` now
-also reports `minimal_dev`, `proc_hardened` and `unix_sockets_blocked`. The unix
+`socket(AF_UNIX)` refused by default (`socketpair` still allowed), and a minimal
+read-only root: the payload sees only the host's `/usr` (and the `/bin /lib*` links),
+a synthesised `/etc`, an empty `/tmp`, `/dev`, `/proc`, scratch and the target, never
+`$HOME`, `/root`, `/var` or `/run`. A runtime outside `/usr` (nvm, pyenv, `/opt`) needs
+`expose=[...]` or `OPENPLOW_SANDBOX_EXPOSE`. `enforced` now
+also reports `minimal_dev`, `proc_hardened`, `unix_sockets_blocked` and `minimal_root`.
+The minimal root is verified on aarch64 under Docker only (x86_64 and split-usr hosts
+are not runtime-verified), is Linux only, and still leaves `/usr` and `/proc/self/mountinfo`
+readable by design. The unix
 socket default breaks a PoC that runs its own unix-socket server; such a PoC needs
 `allow_unix_sockets=True`. `scripts/test_linux.sh` can run the tests as a non-root
 user with `OPENPLOW_TEST_USER=<uid>`. On macOS and Windows the `stub` backend
