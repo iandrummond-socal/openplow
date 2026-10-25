@@ -56,6 +56,27 @@ openplow benchmark benchmarks/upstream/benchmark.json \
   --sandbox unshare
 ```
 
+## Decoys and the combined run
+
+Each target has a bug-free twin: the same source with the real fix applied,
+under `targets/archive-tree-safe` and `targets/token-verify-safe`. They are
+marked `"decoy": true`, so anything the pipeline *confirms* on them is a false
+positive by construction. `with-decoys.json` runs the two vulnerable targets and
+their two decoys together, so one report shows recall and false positives side by
+side:
+
+```bash
+openplow benchmark benchmarks/upstream/with-decoys.json \
+  --adapter fixture:benchmarks/upstream/fixture.json
+```
+
+Expected: `recall=100%` and `decoys_clean=2/2 false_positives=0`. The fixture
+replays the same exploit findings against every target; on a decoy the exploit
+PoC runs against the fixed code and fails, so the finding is rejected. The decoys
+are the maintainers' post-fix source, so they are free of the benchmarked bug;
+as with any decoy, a genuine side bug found in one would score as a false
+positive.
+
 ## Adding another upstream target
 
 1. Find a fix commit in a small, dependency-light project. Check out its parent.
