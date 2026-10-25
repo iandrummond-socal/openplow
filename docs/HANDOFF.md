@@ -18,7 +18,7 @@ state and next steps. Read both before starting.
 | #6 | CI: ruff + pytest on Python 3.11 and 3.13 |
 | #7 | `openplow rescore`: re-score a saved run offline |
 
-The suite has 102 tests, all passing, and lint is clean.
+The suite has 147 tests, all passing (24 of them run only on Linux), and lint is clean.
 
 ## Results so far, and their limits
 
@@ -70,7 +70,18 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 
 | Needs | Task |
 | --- | --- |
-| no credits | Sandbox: `systemd-run --user` memory cap for desktop Linux, and an unprivileged-Linux CI job (roadmap M1; read-only target, capability drop, seccomp and the delegated-cgroup cap are done) |
+| no credits | Sandbox: hide `/run`, `/tmp` and `/var/run` (planned as checkpoint 2, skipped; until it lands, `allow_unix_sockets=True` leaves host sockets there reachable) |
+| no credits | Sandbox: automated isolation PoC tests (`tests/test_sandbox_isolation.py`); the `/dev`, `/proc` and unix-socket behaviour was proven by hand probes only |
+| no credits | Sandbox: minimal read-only root (hide `$HOME` reads), `systemd-run --user` memory cap for desktop Linux, a non-privileged Linux CI job, loopback networking, runtime verification on x86_64 (roadmap M1) |
+
+Sandbox state: done on Linux are the read-only target, capability drop, seccomp,
+the delegated-cgroup cap, a minimal `/dev`, read-only `/proc` kernel controls, and
+`socket(AF_UNIX)` refused by default (`socketpair` still allowed). `enforced` now
+also reports `minimal_dev`, `proc_hardened` and `unix_sockets_blocked`. The unix
+socket default breaks a PoC that runs its own unix-socket server; such a PoC needs
+`allow_unix_sockets=True`. `scripts/test_linux.sh` can run the tests as a non-root
+user with `OPENPLOW_TEST_USER=<uid>`. On macOS and Windows the `stub` backend
+enforces none of this.
 | ~$2 credit | Decoys-only real run → first false-positive rate |
 | ~$5–6 credit | `benchmarks/cve-and-decoys.json` real run → honest recall and false positives in one report |
 
