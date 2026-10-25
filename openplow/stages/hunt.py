@@ -12,7 +12,7 @@ A finder that supports tool use also gets read-only ``list_files`` /
 hunting in rather than guess from file names.
 
 Every hunter call's raw output (prompt, final text, per-turn tool calls, stop
-reason, what was parsed and dropped) is written to
+reason, refusal details and which model served it, what was parsed and dropped) is written to
 ``<out>/transcripts/hunt/<cell>.json`` so a miss can be diagnosed afterwards.
 Model output is parsed and schema-checked before anything is persisted; a
 finding that does not parse or is missing required fields is dropped and logged
@@ -151,6 +151,9 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         "task": payload, "finder": ctx.finder.name, "outcome": resp.outcome.value,
         "error": resp.error, "stop_reason": (resp.raw or {}).get("stop_reason"),
         "tool_rounds": (resp.raw or {}).get("tool_rounds"),
+        "stop_details": (resp.raw or {}).get("stop_details"),
+        "served_by": (resp.raw or {}).get("served_by"),
+        "fallbacks": (resp.raw or {}).get("fallbacks"),
         "system": system, "prompt": prompt, "text": resp.text,
         "transcript": (resp.raw or {}).get("transcript"),
     }
@@ -165,7 +168,14 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         return {"area": area, "attack_class": attack_class, "findings": 0, "fatal": True}
 
     parsed = _parse_findings(resp.text)
-    if not parsed and resp.text.strip() and resp.text.strip() != "STUB_OK" \
+    refused = record["stop_reason"] == "refusal"
+    if refused:
+        # A safety-classifier decline (after any fallback) is not "found nothing".
+        category = (record["stop_details"] or {}).get("category")
+        ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
+                           f"hunter refused on {area}/{attack_class} (category: {category}); "
+                           f"see {transcript_path}")
+    elif not parsed and resp.text.strip() and resp.text.strip() != "STUB_OK" \
             and not _is_empty_answer(resp.text):
         ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
                            f"unparseable hunter output on {area}/{attack_class}; "

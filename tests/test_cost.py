@@ -87,6 +87,7 @@ class _FakeClient:
     def __init__(self):
         self.last_kwargs = None
         self.messages = self
+        self.beta = self
 
     def create(self, **kwargs):
         self.last_kwargs = kwargs

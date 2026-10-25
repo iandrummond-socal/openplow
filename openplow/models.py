@@ -100,15 +100,22 @@ class AnthropicAdapter(ModelAdapter):
 
     Lazily imports ``anthropic`` so the base install stays dependency-free.
     Install with ``pip install 'openplow[anthropic]'``.
+
+    Server-side refusal fallback is on by default (``fallbacks="default"``): when
+    a safety classifier declines a request, the API re-runs it on Anthropic's
+    recommended model for that refusal category within the same call. Pass
+    ``fallbacks=None`` to turn it off. Haiku models have no server-side fallback,
+    so it is never sent for them.
     """
 
     supports_tools = True
 
     def __init__(self, model: str, api_key: str | None = None, *, name: str | None = None,
-                 effort: str | None = "high"):
+                 effort: str | None = "high", fallbacks: str | None = "default"):
         self.model = model
         self.name = name or f"anthropic:{model}"
         self.effort = effort  # output_config effort; "high" is good for audit work
+        self.fallbacks = fallbacks if fallbacks and "haiku" not in model else None
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._client: Any = None
 
@@ -125,6 +132,12 @@ class AnthropicAdapter(ModelAdapter):
             self._client = anthropic.Anthropic(api_key=self._api_key)
         return self._client
 
+    def _create(self, client: Any, kwargs: dict[str, Any]) -> Any:
+        if self.fallbacks:
+            return client.beta.messages.create(betas=[_FALLBACK_BETA],
+                                               fallbacks=self.fallbacks, **kwargs)
+        return client.messages.create(**kwargs)
+
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
         # Note: temperature/top_p are intentionally not sent — current models
         # reject non-default sampling. Thinking is adaptive by default (omitted).
@@ -138,7 +151,7 @@ class AnthropicAdapter(ModelAdapter):
             }
             if self.effort:
                 kwargs["output_config"] = {"effort": self.effort}
-            msg = client.messages.create(**kwargs)
+            msg = self._create(client, kwargs)
             text = "".join(
                 block.text for block in msg.content if getattr(block, "type", None) == "text"
             )
@@ -147,6 +160,7 @@ class AnthropicAdapter(ModelAdapter):
                 "stop_reason": getattr(msg, "stop_reason", None),
                 "model": self.model,
                 "usage": _extract_usage(msg),
+                **_refusal_info(msg, self.model),
             })
         except Exception as exc:  # noqa: BLE001 - adapter boundary
             return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc))
@@ -167,6 +181,8 @@ class AnthropicAdapter(ModelAdapter):
         turn_usages: list[dict[str, int]] = []
         tool_rounds = 0
         final_call = False
+        served_by: set[str] = set()
+        fallbacks: list[dict[str, Any]] = []
         try:
             client = self._ensure_client()
             while True:
@@ -181,15 +197,18 @@ class AnthropicAdapter(ModelAdapter):
                     kwargs["tool_choice"] = {"type": "none"}
                 if self.effort:
                     kwargs["output_config"] = {"effort": self.effort}
-                msg = client.messages.create(**kwargs)
+                msg = self._create(client, kwargs)
                 turn_usages.append(_extract_usage(msg))
+                info = _refusal_info(msg, self.model)
                 stop = getattr(msg, "stop_reason", None)
                 text = "".join(b.text for b in msg.content
                                if getattr(b, "type", None) == "text")
                 calls = [b for b in msg.content if getattr(b, "type", None) == "tool_use"]
                 turn: dict[str, Any] = {"stop_reason": stop, "text": text,
                                         "tool_calls": [{"name": c.name, "input": c.input}
-                                                       for c in calls]}
+                                                       for c in calls], **info}
+                served_by.add(info["served_by"])
+                fallbacks.extend(info["fallbacks"])
                 transcript.append(turn)
                 # Pass the assistant content back unchanged (thinking blocks included).
                 messages.append({"role": "assistant", "content": msg.content})
@@ -226,6 +245,9 @@ class AnthropicAdapter(ModelAdapter):
                 "turn_usages": turn_usages,
                 "tool_rounds": tool_rounds,
                 "transcript": transcript,
+                "served_by": sorted(served_by),
+                "fallbacks": fallbacks,
+                "stop_details": info.get("stop_details"),
             })
         except Exception as exc:  # noqa: BLE001 - adapter boundary
             return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc),
@@ -233,19 +255,40 @@ class AnthropicAdapter(ModelAdapter):
                                       "turn_usages": turn_usages, "transcript": transcript})
 
 
-def _sum_usage(usages: list[dict[str, int]]) -> dict[str, int]:
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+def _refusal_info(msg: Any, requested: str) -> dict[str, Any]:
+    """Which model served a response, any fallback hops, and refusal details."""
+    hops = [{"from": getattr(getattr(b, "from_", None), "model", None),
+             "to": getattr(getattr(b, "to", None), "model", None)}
+            for b in msg.content if getattr(b, "type", None) == "fallback"]
+    details = getattr(msg, "stop_details", None)
+    stop_details = None
+    if details is not None:
+        stop_details = {"category": getattr(details, "category", None),
+                        "explanation": getattr(details, "explanation", None)}
+    served = getattr(msg, "model", None)
+    return {"served_by": served if isinstance(served, str) else requested,
+            "fallbacks": hops, "stop_details": stop_details}
+
+
+def _sum_usage(usages: list[dict[str, Any]]) -> dict[str, int]:
     total: dict[str, int] = {}
     for u in usages:
         for k, v in u.items():
-            total[k] = total.get(k, 0) + v
+            if isinstance(v, int):
+                total[k] = total.get(k, 0) + v
     return total
 
 
-def _extract_usage(msg: Any) -> dict[str, int]:
+def _extract_usage(msg: Any) -> dict[str, Any]:
     u = getattr(msg, "usage", None)
     if u is None:
         return {}
+    served = getattr(msg, "model", None)
     return {
+        **({"model": served} if isinstance(served, str) else {}),
         "input_tokens": getattr(u, "input_tokens", 0) or 0,
         "output_tokens": getattr(u, "output_tokens", 0) or 0,
         "cache_read_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
@@ -348,9 +391,10 @@ class MeteredAdapter(ModelAdapter):
         for usage in usages:
             if not usage:
                 continue
+            # Bill each call to the model that served it (a fallback may differ).
             self._store.add_usage(
                 self._run_id, self._repo, self._role,
-                raw.get("model", self.model),
+                usage.get("model") or raw.get("model", self.model),
                 int(usage.get("input_tokens", 0)),
                 int(usage.get("output_tokens", 0)),
                 int(usage.get("cache_read_tokens", 0)),

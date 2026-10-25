@@ -51,6 +51,8 @@ def _write_transcript(ctx: RunContext, finding: dict[str, Any], system: str, pro
         "finding_id": finding.get("id"), "validator": ctx.validator.name,
         "outcome": resp.outcome.value, "error": resp.error,
         "stop_reason": raw.get("stop_reason"), "tool_rounds": raw.get("tool_rounds"),
+        "stop_details": raw.get("stop_details"), "served_by": raw.get("served_by"),
+        "fallbacks": raw.get("fallbacks"),
         "system": system, "prompt": prompt, "text": resp.text,
         "transcript": raw.get("transcript"),
     }, indent=2, default=str), encoding="utf-8")
@@ -104,6 +106,10 @@ def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, s
     else:
         resp = ctx.validator.complete(system, prompt)
     _write_transcript(ctx, finding, system, prompt, resp)
+    if (resp.raw or {}).get("stop_reason") == "refusal":
+        category = ((resp.raw or {}).get("stop_details") or {}).get("category")
+        ctx.store.add_wish(ctx.run_id, ctx.repo_name, "validate",
+                           f"validator refused on {finding.get('id')} (category: {category})")
     if resp.outcome is Outcome.RETRYABLE:
         raise RuntimeError("validator transient failure")
     if resp.text.strip() == "STUB_OK":

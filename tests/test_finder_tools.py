@@ -87,6 +87,7 @@ class _ScriptedClient:
         self._script = list(script)
         self.requests: list[dict] = []
         self.messages = self
+        self.beta = self
 
     def create(self, **kwargs):
         self.requests.append({**kwargs, "messages": list(kwargs["messages"])})
@@ -315,3 +316,47 @@ def test_validator_reads_repo_and_saves_transcript(tmp_path, repo):
     assert "read_file" in (validator.system or "")
     record = json.loads((ctx.out_dir / "transcripts" / "validate" / "cmd-1.json").read_text())
     assert record["text"].endswith("VERDICT: confirmed")
+
+
+# ---- refusals and server-side fallback ---------------------------------------
+
+def test_fallback_sent_on_beta_path_and_served_model_recorded(tmp_path, repo):
+    msg = _Msg("end_turn", [
+        _Block(type="fallback", from_=_Block(model="claude-opus-5-5"),
+               to=_Block(model="claude-opus-4-8")),
+        _Block(type="text", text="[]")])
+    msg.model = "claude-opus-4-8"
+    client = _ScriptedClient([msg])
+    inner = AnthropicAdapter(model="claude-opus-5-5", api_key="x")
+    inner._client = client
+    store = Store(tmp_path / "db.sqlite")
+    store.create_run("r", "repo", "x")
+    resp = MeteredAdapter(inner, store, "r", "repo", "finder").complete_with_tools(
+        "sys", "prompt", RepoTools(repo))
+    assert client.requests[0]["fallbacks"] == "default"
+    assert client.requests[0]["betas"] == ["server-side-fallback-2026-07-01"]
+    assert resp.raw["served_by"] == ["claude-opus-4-8"]
+    assert resp.raw["fallbacks"] == [{"from": "claude-opus-5-5", "to": "claude-opus-4-8"}]
+    assert store.usage_by_model("r")[0]["model"] == "claude-opus-4-8"
+
+
+def test_no_fallback_for_haiku_or_when_disabled():
+    assert AnthropicAdapter(model="claude-haiku-5-5", api_key="x").fallbacks is None
+    assert AnthropicAdapter(model="claude-opus-5-5", api_key="x", fallbacks=None).fallbacks is None
+
+
+class _RefusingFinder(_ToolFinder):
+    def complete_with_tools(self, system, prompt, tools, *, max_tokens=4096, max_rounds=30):
+        return ModelResponse(outcome=Outcome.OK, text="partial ```json [ {", raw={
+            "stop_reason": "refusal", "stop_details": {"category": "cyber"},
+            "served_by": ["claude-opus-4-8"], "transcript": []})
+
+
+def test_hunt_logs_refusal_instead_of_unparseable(tmp_path, repo):
+    ctx = _ctx(tmp_path, repo, _RefusingFinder(""))
+    hunt.run_task(ctx, {"area": "src", "attack_class": "cloud-and-deployment"})
+    wishes = [w["item"] for w in ctx.store.wishes("run-t")]
+    assert len(wishes) == 1 and "hunter refused" in wishes[0] and "cyber" in wishes[0]
+    record = json.loads((ctx.out_dir / "transcripts" / "hunt"
+                         / "src__cloud-and-deployment__d1.json").read_text())
+    assert record["stop_details"] == {"category": "cyber"}
