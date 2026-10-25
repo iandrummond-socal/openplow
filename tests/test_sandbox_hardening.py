@@ -432,3 +432,22 @@ def test_cgroup_parent_picks_a_delegated_writable_cgroup(tmp_path: Path):
     # Not cgroup v2 (no cgroup.controllers): no cap.
     (root / "cgroup.controllers").unlink()
     assert sandbox_mod._cgroup_parent(root, proc) is None
+
+
+@needs_cgroup
+def test_payload_cannot_lift_its_own_memory_cap(tmp_path: Path):
+    # The leaf's files map to the payload's root inside the user namespace, so the
+    # cgroup filesystem must be read-only there or the payload can write memory.max.
+    code = ("import os\n"
+            "rel = open('/proc/self/cgroup').read().strip().split('::', 1)[1]\n"
+            "try:\n"
+            "    open('/sys/fs/cgroup' + rel + '/memory.max', 'w').write('max')\n"
+            "    print('LIFTED')\n"
+            "except OSError as e:\n"
+            "    print('blocked', e.errno)\n")
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=128))
+    res = _py(sb, code)
+    assert "LIFTED" not in res.stdout and "blocked" in res.stdout, res.stdout + res.stderr
+    # ...and the cap still bites after the attempt.
+    res = _py(sb, _BOMB)
+    assert res.oom_killed and "survived" not in res.stdout

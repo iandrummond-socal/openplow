@@ -51,8 +51,11 @@ _OPT_FLAGS = {
     "noatime": MS_NOATIME, "nodiratime": MS_NODIRATIME, "relatime": MS_RELATIME,
 }
 
-# Mounts that are not part of the file tree a payload could write source into.
-_SKIP_PREFIXES = ("/proc", "/sys", "/dev")
+# Mounts left as they are. /sys is NOT here: its cgroup filesystem is writable, and
+# the payload's cgroup leaf maps to root inside the user namespace, so the payload
+# could otherwise raise its own memory.max. The cgroup join happens in the parent,
+# before unshare, so the payload never needs to write there.
+_SKIP_PREFIXES = ("/proc", "/dev")
 
 # ---- seccomp -------------------------------------------------------------
 PR_SET_NO_NEW_PRIVS = 38
