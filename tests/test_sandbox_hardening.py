@@ -4,6 +4,10 @@ The seccomp tests run a small BPF interpreter over the generated program, so the
 check behavior on any machine. The tests that start a real ``unshare`` sandbox
 skip where unprivileged user namespaces are unavailable (some CI images, Docker
 without ``seccomp=unconfined``).
+
+The minimal read-only root (the host's ``$HOME`` and the rest of the filesystem are
+not visible) has its own PoCs in ``test_sandbox_root.py``; here it only appears in
+the ``enforced`` report.
 """
 
 from __future__ import annotations
@@ -271,7 +275,7 @@ def test_enforced_reports_every_protection_on_a_normal_run(tmp_path: Path):
     assert {k: v for k, v in res.enforced.items() if k != "memory_cap"} == {
         "network_isolated": True, "readonly_fs": True, "no_capabilities": True,
         "seccomp": True, "heap_limit": True, "minimal_dev": True, "proc_hardened": True,
-        "unix_sockets_blocked": True}
+        "unix_sockets_blocked": True, "minimal_root": True}
     assert res.enforced["memory_cap"] is (sandbox_mod._cgroup_parent() is not None)
 
 

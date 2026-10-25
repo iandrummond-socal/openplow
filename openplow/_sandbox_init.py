@@ -3,6 +3,12 @@
 ``UnshareSandbox`` runs this file as ``python3 -I _sandbox_init.py ... -- cmd``.
 It tightens the process in these steps, then ``exec``s the command:
 
+0. Switch into a minimal root (``pivot_root``): a fresh tmpfs holding the host's
+   ``/usr`` and the ``/bin /lib ...`` links read-only, a synthesised ``/etc``, an
+   empty ``/tmp``, the host's ``/dev`` and ``/proc`` (steps 1 and 2 then replace
+   and pin them), and each ``--rw``, ``--ro`` and ``--expose`` path at its own
+   absolute path. ``$HOME``, ``/root``, ``/var``, ``/run`` ... are not in it.
+   Toggled off with ``--no-minimal-root``; it requires step 1.
 1. Replace ``/dev`` with a minimal tmpfs holding only ``null zero full random
    urandom tty``, a private ``devpts`` and ``/dev/shm``, and the ``fd`` and
    ``std*`` symlinks, so the host's other device nodes (``kmsg``, ``mem``,
@@ -21,10 +27,12 @@ It tightens the process in these steps, then ``exec``s the command:
    loading, namespace creation, io_uring and similar).
 6. ``exec`` the command.
 
-Steps 1 and 2 run before step 3 so that every later step sees the final mount
-tree. Each ``/dev`` or ``/proc`` replacement is assembled in a throwaway
-``tempfile.mkdtemp`` staging dir under the first ``--rw`` path and rbound over
-its target; with no ``--rw`` path to stage under, the launcher fails closed.
+Steps 0, 1 and 2 run before step 3 so that every later step sees the final mount
+tree. Each replacement is assembled in a throwaway ``tempfile.mkdtemp`` staging
+dir under the first ``--rw`` path (the new root's staging dir is switched into
+rather than rbound); with no ``--rw`` path to stage under, the launcher fails
+closed. Nothing may be imported after step 0: the interpreter's own library may
+no longer be visible, so every module the later steps use is imported up here.
 
 Why a separate file: the mounts and the seccomp filter must go in *after* the
 namespaces are set up, and the filter would block ``unshare`` and ``mount``
@@ -77,6 +85,22 @@ _OPT_FLAGS = {
 # the payload could otherwise raise its own memory.max. The cgroup join happens in
 # the parent, before unshare, so the payload never needs to write there.
 _SKIP_PREFIXES = ("/proc", "/dev/shm", "/dev/pts")
+# With the minimal root there is no /tmp, /run or /var to skip: /tmp is an empty
+# read-only directory, so it is deliberately NOT listed here.
+
+# The host directories the minimal root carries over, read-only. A merged-usr host
+# has the others as symlinks into /usr, which are recreated as links.
+_ROOT_DIRS = ("usr", "bin", "sbin", "lib", "lib32", "lib64", "libx32")
+# Paths that are never grafted into the minimal root: they are rebuilt or absent.
+_NEVER_GRAFTED = ("/proc", "/dev", "/sys")
+# The only account files the payload sees; never the host's.
+_ETC_FILES = {
+    "passwd": "root:x:0:0:root:/tmp:/bin/sh\n"
+              "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
+    "group": "root:x:0:\nnogroup:x:65534:\n",
+    "nsswitch.conf": "passwd: files\ngroup: files\nhosts: files\n",
+    "hosts": "127.0.0.1 localhost\n",
+}
 
 # ---- seccomp -------------------------------------------------------------
 PR_SET_NO_NEW_PRIVS = 38
@@ -319,6 +343,147 @@ def _drop_stage(libc, stage: str) -> None:
         pass
 
 
+def _bind_readonly(libc, src: str, dst: str, recursive: bool = True) -> None:
+    """Bind ``src`` onto ``dst`` and make it read-only at once, keeping inherited flags."""
+    _mount(libc, src, dst, None, MS_BIND | (MS_REC if recursive else 0))
+    # Remounting an unprivileged bind must keep the flags it inherited.
+    flags = max((f for m, f in _mounts() if m == dst), default=0)
+    _mount(libc, None, dst, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
+
+
+def _check_root_paths(rw: list[str], ro: list[str],
+                      expose: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Validate every path before anything is created or mounted; return real paths."""
+    if not rw:
+        _fail("a minimal root needs a writable --rw path to stage under")
+    checked: list[list[str]] = []
+    for kind, raw in (("--rw", rw), ("--ro", ro), ("--expose", expose)):
+        real_paths = []
+        for path in raw:
+            if not os.path.isabs(path):
+                _fail(f"{kind} path {path!r} is not absolute")
+            real = os.path.realpath(path)
+            if not os.path.exists(real):
+                _fail(f"{kind} path {path!r} does not exist on the host")
+            if real == "/" or any(_within(real, hidden) for hidden in _NEVER_GRAFTED):
+                _fail(f"{kind} path {path!r} cannot be placed in a minimal root")
+            real_paths.append(real)
+        checked.append(real_paths)
+    rws, ros, exps = checked
+    for path in rws:
+        if any(_within(path, "/" + name) for name in _ROOT_DIRS):
+            _fail(f"scratch {path!r} cannot live under a read-only system directory")
+    for path in ros + exps:
+        if any(_within(w, path) for w in rws):
+            _fail(f"{path!r} is read-only but contains the writable path; it would cover it")
+    return rws, ros, exps
+
+
+def _write_file(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _build_etc(libc, stage: str) -> None:
+    """A synthesised ``/etc``: never the host's accounts, hostname or keys."""
+    etc = os.path.join(stage, "etc")
+    os.mkdir(etc)
+    for name, text in _ETC_FILES.items():
+        _write_file(os.path.join(etc, name), text)
+    if not os.path.exists("/etc/ld.so.cache"):
+        _fail("no /etc/ld.so.cache; the dynamic loader would not find the libraries "
+              "under /usr/lib/<triplet>")
+    cache = os.path.join(etc, "ld.so.cache")
+    os.close(os.open(cache, os.O_CREAT | os.O_WRONLY, 0o600))
+    _bind_readonly(libc, "/etc/ld.so.cache", cache, recursive=False)
+    if os.path.isdir("/etc/alternatives"):
+        alternatives = os.path.join(etc, "alternatives")
+        os.mkdir(alternatives)
+        _bind_readonly(libc, "/etc/alternatives", alternatives)
+    if os.path.exists("/usr/lib/os-release"):
+        os.symlink("../usr/lib/os-release", os.path.join(etc, "os-release"))
+
+
+def _graft(libc, stage: str, path: str, writable: bool) -> None:
+    """Bind the host ``path`` into the new root at the same absolute path."""
+    if not writable and any(_within(path, "/" + name) for name in _ROOT_DIRS):
+        return  # already visible, read-only, through the system directory bind
+    dst = stage + path
+    if os.path.isdir(path):
+        os.makedirs(dst, exist_ok=True)
+    else:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.close(os.open(dst, os.O_CREAT | os.O_WRONLY, 0o600))
+    if writable:
+        # Not recursive: the staging tmpfs is mounted inside scratch, and a recursive
+        # bind of scratch would drag it into itself.
+        _mount(libc, path, dst, None, MS_BIND)
+    else:
+        _bind_readonly(libc, path, dst)
+
+
+def _build_root(libc, stage: str, rws: list[str], ros: list[str], exps: list[str]) -> None:
+    for name in _ROOT_DIRS:
+        src, dst = "/" + name, os.path.join(stage, name)
+        if os.path.islink(src):
+            os.symlink(os.readlink(src), dst)
+        elif os.path.isdir(src):
+            os.mkdir(dst)
+            _bind_readonly(libc, src, dst)
+    _build_etc(libc, stage)
+    for name in ("tmp", "dev", "proc"):
+        os.mkdir(os.path.join(stage, name))
+    # The host's /dev and /proc; minimal_dev and harden_proc replace and pin them next.
+    _mount(libc, "/proc", os.path.join(stage, "proc"), None, MS_BIND | MS_REC)
+    _mount(libc, "/dev", os.path.join(stage, "dev"), None, MS_BIND | MS_REC)
+    grafts = [(p, True) for p in rws] + [(p, False) for p in ros + exps]
+    done: set[str] = set()
+    for path, writable in sorted(grafts, key=lambda g: g[0].count("/")):  # parents first
+        if path not in done:
+            done.add(path)
+            _graft(libc, stage, path, writable)
+
+
+def minimal_root(rw: list[str], ro: list[str], expose: list[str]) -> None:
+    """Replace the whole filesystem view with a small, fresh, read-only root.
+
+    The host's ``$HOME``, ``/root``, ``/var``, ``/run``, ``/sys`` and the rest are not
+    in it. The new root is assembled in a staging tmpfs under the first ``--rw`` path
+    and entered with ``pivot_root(".", ".")`` followed by a lazy unmount of the old
+    root, the way bubblewrap does it. Every path is validated before anything is
+    created, and a failure before the switch removes the staging directory.
+    """
+    libc = _libc()
+    rws, ros, exps = _check_root_paths(rw, ro, expose)
+    machine = platform.machine()
+    if machine not in _ARCHES:
+        _fail(f"no pivot_root number for architecture {machine!r}")
+    pivot_root_nr = _ARCHES[machine][1]["pivot_root"]
+    stage = _stage(rws[0])
+    try:
+        try:
+            _build_root(libc, stage, rws, ros, exps)
+        except OSError as exc:
+            _fail(f"could not build the minimal root: {exc}")
+        # The staging tmpfs holds only mountpoints and generated files; scratch and any
+        # other --rw path are separate mounts and stay writable.
+        _mount(libc, None, stage, None, MS_REMOUNT | MS_RDONLY)
+        os.chdir(stage)
+        if libc.syscall(pivot_root_nr, b".", b".") != 0:
+            _fail(f"pivot_root failed: {os.strerror(ctypes.get_errno())} "
+                  "(the root filesystem must be a real mount, not an initramfs)")
+    except BaseException:
+        _drop_stage(libc, stage)
+        raise
+    if libc.umount2(b".", MNT_DETACH) != 0:
+        _fail(f"could not detach the old root: {os.strerror(ctypes.get_errno())}")
+    os.chdir("/")
+    try:  # the now-empty staging mountpoint, seen through the scratch bind
+        os.rmdir(os.path.join(rws[0], os.path.basename(stage)))
+    except OSError:
+        pass
+
+
 def minimal_dev(stage: str) -> None:
     """Replace ``/dev`` with a tree holding only the nodes a payload needs.
 
@@ -419,9 +584,10 @@ def apply_seccomp(deny_unix_sockets: bool = True) -> None:
 def main(argv: list[str]) -> None:
     rw: list[str] = []
     ro: list[str] = []
+    expose: list[str] = []
     status_fd: int | None = None
     readonly = seccomp = True
-    do_minimal_dev = do_proc_harden = True
+    do_minimal_dev = do_proc_harden = do_minimal_root = True
     deny_unix_sockets = True
     i = 0
     while i < len(argv) and argv[i] != "--":
@@ -431,6 +597,12 @@ def main(argv: list[str]) -> None:
         elif argv[i] == "--ro":
             ro.append(argv[i + 1])
             i += 2
+        elif argv[i] == "--expose":
+            expose.append(argv[i + 1])
+            i += 2
+        elif argv[i] == "--no-minimal-root":
+            do_minimal_root = False
+            i += 1
         elif argv[i] == "--status-fd":
             status_fd = int(argv[i + 1])
             i += 2
@@ -457,7 +629,20 @@ def main(argv: list[str]) -> None:
     if not command:
         _fail("no command given")
 
+    if do_minimal_root and not do_minimal_dev:
+        # With the host's /dev left in, a payload running as real root could read the
+        # block devices directly, whatever the root hides.
+        _fail("a minimal root needs the minimal /dev")
+
     applied: list[str] = []
+    if do_minimal_root:
+        cwd = os.getcwd()  # the switch loses it; the path exists again through its graft
+        minimal_root(rw, ro, expose)
+        try:
+            os.chdir(cwd)
+        except OSError:
+            _fail(f"the working directory {cwd!r} is not inside the minimal root")
+        applied.append("minimal_root")
     # /dev and /proc go first so make_readonly sees the final tree: the new /dev is
     # a fresh mount that it then remounts read-only.
     if do_minimal_dev:

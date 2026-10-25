@@ -130,7 +130,9 @@ def test_dev_twin_shows_host_devices_without_minimal_dev(tmp_path: Path):
     if not present:
         pytest.skip("the host has none of the devices a PoC would reach for")
     code = f"import os; print(*[n for n in {present!r} if os.path.lexists('/dev/' + n)])"
-    res = _py(_sandbox(tmp_path, minimal_dev=False), code)
+    # The host /dev is only allowed without the minimal root (a real-root payload could
+    # read the block devices and reach the whole host filesystem through them).
+    res = _py(_sandbox(tmp_path, minimal_dev=False, minimal_root=False), code)
     assert res.returncode == 0, res.stderr
     assert res.stdout.split() == present
 
@@ -219,9 +221,12 @@ def test_unix_sockets_are_refused_by_default(tmp_path: Path, host_socket: Path):
 @needs_unshare
 def test_unix_socket_twin_connects_when_opted_in(tmp_path: Path, host_socket: Path):
     # The documented limit: with allow_unix_sockets=True a socket the sandbox can
-    # see is reachable. Hiding /run and /tmp narrows what it can see; it is the
-    # reason this stays off by default.
-    res = _py(_sandbox(tmp_path, allow_unix_sockets=True), _connect_code(host_socket))
+    # see is reachable; it is the reason this stays off by default. The minimal root
+    # hides host sockets outside scratch, so this twin turns it off to show the limit;
+    # the default (ENOENT) is test_host_unix_sockets_are_not_visible_even_when_opted_in
+    # in tests/test_sandbox_root.py.
+    sb = _sandbox(tmp_path, allow_unix_sockets=True, minimal_root=False)
+    res = _py(sb, _connect_code(host_socket))
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == "CONNECTED"
 
@@ -283,6 +288,11 @@ def test_abstract_unix_sockets_are_unreachable_even_when_opted_in(tmp_path: Path
 def test_a_hostile_poc_reaches_nothing_outside_its_scratch(tmp_path: Path, host_socket: Path):
     """One PoC that tries everything above in a row, as a real finding might."""
     outside = tmp_path / "outside.txt"
+    # A host secret outside scratch (a stand-in for ~/.ssh/id_rsa): the minimal root
+    # hides it, so reading it turns this test red if the minimal root is ever lost.
+    secret = tmp_path / "host-secret" / "id_rsa"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE KEY")
     code = (
         "import socket, subprocess\n"
         "tried = {}\n"
@@ -292,6 +302,7 @@ def test_a_hostile_poc_reaches_nothing_outside_its_scratch(tmp_path: Path, host_
         "    except OSError:\n"
         "        tried[name] = 'blocked'\n"
         f"attempt('write-outside', lambda: open({str(outside)!r}, 'w'))\n"
+        f"attempt('read-secret', lambda: open({str(secret)!r}).read())\n"
         "attempt('kernel', lambda: open('/proc/sys/kernel/core_pattern', 'w').write('|/x'))\n"
         "attempt('sysrq', lambda: open('/proc/sysrq-trigger', 'w'))\n"
         "attempt('kmsg', lambda: open('/dev/kmsg', 'w'))\n"
@@ -301,6 +312,8 @@ def test_a_hostile_poc_reaches_nothing_outside_its_scratch(tmp_path: Path, host_
     res = _py(_sandbox(tmp_path), code)
     assert res.returncode == 0, res.stderr
     assert "GOT THROUGH" not in res.stdout, res.stdout
+    assert "('read-secret', 'blocked')" in res.stdout, res.stdout  # the attempt ran
+    assert "PRIVATE KEY" not in res.stdout
     assert not outside.exists()
 
 
