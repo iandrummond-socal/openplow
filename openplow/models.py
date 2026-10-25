@@ -65,10 +65,20 @@ class ModelAdapter(ABC):
     #: Human-readable name recorded in finding provenance.
     name: str = "abstract"
 
+    #: Whether :meth:`complete_with_tools` actually lets the model call tools.
+    supports_tools: bool = False
+
     @abstractmethod
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
         """Turn a prompt into text, classifying how the call went."""
         raise NotImplementedError
+
+    def complete_with_tools(self, system: str, prompt: str, tools: Any, *,
+                            max_tokens: int = 4096, max_rounds: int = 30) -> ModelResponse:
+        """Like :meth:`complete`, but the model may call ``tools`` (an object with
+        ``specs()`` and ``call(name, args)``, e.g. :class:`~openplow.repo_tools.RepoTools`)
+        before answering. Adapters without tool support ignore the tools."""
+        return self.complete(system, prompt, max_tokens=max_tokens)
 
 
 class StubAdapter(ModelAdapter):
@@ -90,13 +100,22 @@ class AnthropicAdapter(ModelAdapter):
 
     Lazily imports ``anthropic`` so the base install stays dependency-free.
     Install with ``pip install 'openplow[anthropic]'``.
+
+    Server-side refusal fallback is on by default (``fallbacks="default"``): when
+    a safety classifier declines a request, the API re-runs it on Anthropic's
+    recommended model for that refusal category within the same call. Pass
+    ``fallbacks=None`` to turn it off. Haiku models have no server-side fallback,
+    so it is never sent for them.
     """
 
+    supports_tools = True
+
     def __init__(self, model: str, api_key: str | None = None, *, name: str | None = None,
-                 effort: str | None = "high"):
+                 effort: str | None = "high", fallbacks: str | None = "default"):
         self.model = model
         self.name = name or f"anthropic:{model}"
         self.effort = effort  # output_config effort; "high" is good for audit work
+        self.fallbacks = fallbacks if fallbacks and "haiku" not in model else None
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._client: Any = None
 
@@ -113,6 +132,12 @@ class AnthropicAdapter(ModelAdapter):
             self._client = anthropic.Anthropic(api_key=self._api_key)
         return self._client
 
+    def _create(self, client: Any, kwargs: dict[str, Any]) -> Any:
+        if self.fallbacks:
+            return client.beta.messages.create(betas=[_FALLBACK_BETA],
+                                               fallbacks=self.fallbacks, **kwargs)
+        return client.messages.create(**kwargs)
+
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
         # Note: temperature/top_p are intentionally not sent — current models
         # reject non-default sampling. Thinking is adaptive by default (omitted).
@@ -126,7 +151,7 @@ class AnthropicAdapter(ModelAdapter):
             }
             if self.effort:
                 kwargs["output_config"] = {"effort": self.effort}
-            msg = client.messages.create(**kwargs)
+            msg = self._create(client, kwargs)
             text = "".join(
                 block.text for block in msg.content if getattr(block, "type", None) == "text"
             )
@@ -135,16 +160,146 @@ class AnthropicAdapter(ModelAdapter):
                 "stop_reason": getattr(msg, "stop_reason", None),
                 "model": self.model,
                 "usage": _extract_usage(msg),
+                **_refusal_info(msg, self.model),
             })
         except Exception as exc:  # noqa: BLE001 - adapter boundary
             return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc))
 
+    def complete_with_tools(self, system: str, prompt: str, tools: Any, *,
+                            max_tokens: int = 4096, max_rounds: int = 30) -> ModelResponse:
+        """Manual tool-use loop: run each requested tool locally and feed the
+        results back until the model answers. After ``max_rounds`` tool rounds
+        the model is told to answer and tools are switched off for the last call.
 
-def _extract_usage(msg: Any) -> dict[str, int]:
+        ``raw`` carries a per-turn ``transcript`` (text, tool calls, truncated
+        tool results, stop reason) so a miss can be diagnosed afterwards, plus
+        summed ``usage`` and the per-call ``turn_usages`` for metering.
+        """
+        specs = tools.specs()
+        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+        transcript: list[dict[str, Any]] = []
+        turn_usages: list[dict[str, int]] = []
+        tool_rounds = 0
+        final_call = False
+        served_by: set[str] = set()
+        fallbacks: list[dict[str, Any]] = []
+        try:
+            client = self._ensure_client()
+            while True:
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "system": system,
+                    "messages": messages,
+                    "tools": specs,
+                }
+                if final_call:
+                    kwargs["tool_choice"] = {"type": "none"}
+                if self.effort:
+                    kwargs["output_config"] = {"effort": self.effort}
+                msg = self._create(client, kwargs)
+                turn_usages.append(_extract_usage(msg))
+                info = _refusal_info(msg, self.model)
+                stop = getattr(msg, "stop_reason", None)
+                text = "".join(b.text for b in msg.content
+                               if getattr(b, "type", None) == "text")
+                calls = [b for b in msg.content if getattr(b, "type", None) == "tool_use"]
+                turn: dict[str, Any] = {"stop_reason": stop, "text": text,
+                                        "tool_calls": [{"name": c.name, "input": c.input}
+                                                       for c in calls], **info}
+                served_by.add(info["served_by"])
+                fallbacks.extend(info["fallbacks"])
+                transcript.append(turn)
+                # Pass the assistant content back unchanged (thinking blocks included).
+                messages.append({"role": "assistant", "content": msg.content})
+
+                if stop == "pause_turn":
+                    continue
+                if stop != "tool_use" or not calls:
+                    break
+
+                results: list[dict[str, Any]] = []
+                turn["tool_results"] = []
+                for c in calls:
+                    try:
+                        out, is_error = tools.call(c.name, c.input), False
+                    except Exception as exc:  # noqa: BLE001 - reported to the model
+                        out, is_error = f"error: {exc}", True
+                    results.append({"type": "tool_result", "tool_use_id": c.id,
+                                    "content": out, "is_error": is_error})
+                    turn["tool_results"].append(
+                        {"name": c.name, "is_error": is_error,
+                         "content": out if len(out) <= 2000 else out[:2000] + "...(truncated)"})
+                tool_rounds += 1
+                if tool_rounds >= max_rounds:
+                    final_call = True
+                    results.append({"type": "text", "text": (
+                        "Tool budget exhausted. Give your final answer now, in the "
+                        "required format, from what you have read.")})
+                messages.append({"role": "user", "content": results})
+
+            return ModelResponse(outcome=classify_body(text), text=text, raw={
+                "stop_reason": stop,
+                "model": self.model,
+                "usage": _sum_usage(turn_usages),
+                "turn_usages": turn_usages,
+                "tool_rounds": tool_rounds,
+                "transcript": transcript,
+                "served_by": sorted(served_by),
+                "fallbacks": fallbacks,
+                "stop_details": info.get("stop_details"),
+            })
+        except Exception as exc:  # noqa: BLE001 - adapter boundary
+            return ModelResponse(outcome=_classify_exception(exc), text="", error=str(exc),
+                                 raw={"model": self.model, "usage": _sum_usage(turn_usages),
+                                      "turn_usages": turn_usages, "transcript": transcript})
+
+
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+def served_model(resp: ModelResponse) -> str | None:
+    """The model that wrote a response's final answer, when the adapter reports
+    it — the fallback model if a refusal was re-run, else the requested one."""
+    raw = resp.raw or {}
+    turns = raw.get("transcript") or []
+    if turns and isinstance(turns[-1], dict) and turns[-1].get("served_by"):
+        return turns[-1]["served_by"]
+    served = raw.get("served_by")
+    return served if isinstance(served, str) else None
+
+
+def _refusal_info(msg: Any, requested: str) -> dict[str, Any]:
+    """Which model served a response, any fallback hops, and refusal details."""
+    hops = [{"from": getattr(getattr(b, "from_", None), "model", None),
+             "to": getattr(getattr(b, "to", None), "model", None)}
+            for b in msg.content if getattr(b, "type", None) == "fallback"]
+    details = getattr(msg, "stop_details", None)
+    stop_details = None
+    if details is not None:
+        stop_details = {"category": getattr(details, "category", None),
+                        "explanation": getattr(details, "explanation", None)}
+    served = getattr(msg, "model", None)
+    return {"served_by": served if isinstance(served, str) else requested,
+            "fallbacks": hops, "stop_details": stop_details}
+
+
+def _sum_usage(usages: list[dict[str, Any]]) -> dict[str, int]:
+    total: dict[str, int] = {}
+    for u in usages:
+        for k, v in u.items():
+            if isinstance(v, int):
+                total[k] = total.get(k, 0) + v
+    return total
+
+
+def _extract_usage(msg: Any) -> dict[str, Any]:
     u = getattr(msg, "usage", None)
     if u is None:
         return {}
+    served = getattr(msg, "model", None)
     return {
+        **({"model": served} if isinstance(served, str) else {}),
         "input_tokens": getattr(u, "input_tokens", 0) or 0,
         "output_tokens": getattr(u, "output_tokens", 0) or 0,
         "cache_read_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
@@ -224,19 +379,38 @@ class MeteredAdapter(ModelAdapter):
     def model(self) -> str:
         return getattr(self.inner, "model", self.inner.name)
 
+    @property
+    def supports_tools(self) -> bool:  # type: ignore[override]
+        return self.inner.supports_tools
+
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
         resp = self.inner.complete(system, prompt, max_tokens=max_tokens)
-        usage = (resp.raw or {}).get("usage") or {}
-        if usage:
+        self._record(resp)
+        return resp
+
+    def complete_with_tools(self, system: str, prompt: str, tools: Any, *,
+                            max_tokens: int = 4096, max_rounds: int = 30) -> ModelResponse:
+        resp = self.inner.complete_with_tools(system, prompt, tools, max_tokens=max_tokens,
+                                              max_rounds=max_rounds)
+        self._record(resp)
+        return resp
+
+    def _record(self, resp: ModelResponse) -> None:
+        raw = resp.raw or {}
+        # A tool loop makes several API calls; record each so "calls" stays honest.
+        usages = raw.get("turn_usages") or ([raw["usage"]] if raw.get("usage") else [])
+        for usage in usages:
+            if not usage:
+                continue
+            # Bill each call to the model that served it (a fallback may differ).
             self._store.add_usage(
                 self._run_id, self._repo, self._role,
-                (resp.raw or {}).get("model", self.model),
+                usage.get("model") or raw.get("model", self.model),
                 int(usage.get("input_tokens", 0)),
                 int(usage.get("output_tokens", 0)),
                 int(usage.get("cache_read_tokens", 0)),
                 int(usage.get("cache_creation_tokens", 0)),
             )
-        return resp
 
 
 # Registry so the CLI can select an adapter by a short name.

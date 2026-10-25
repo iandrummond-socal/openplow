@@ -21,6 +21,10 @@
       "type": "string",
       "description": "One of the attack classes from the skill's class files (e.g. web-auth, memory-safety, llm, supply-chain)."
     },
+    "weakness": {
+      "type": ["string", "null"],
+      "description": "The hunter's own label for the weakness (e.g. 'OS command injection (CWE-78)'). attack_class is the hunt cell's class."
+    },
     "severity": {
       "type": ["string", "null"],
       "enum": ["critical", "high", "medium", "low", "info", null],
@@ -67,6 +71,7 @@
       "description": "Filled by the adversarial validator; never by the finder.",
       "properties": {
         "checked_by": { "type": "string" },
+        "served_by": { "type": ["string", "null"], "description": "Model id that wrote the validator's verdict (a fallback model if the request was refused)." },
         "disproof_attempted": { "type": "boolean" },
         "notes": { "type": "string" }
       }
@@ -80,6 +85,10 @@
         "repo": { "type": "string" },
         "stage": { "type": "string" },
         "finder_model": { "type": ["string", "null"] },
+        "served_by": {
+          "type": ["string", "null"],
+          "description": "Model id that wrote the hunter's final answer; differs from finder_model when a refused request fell back to another model."
+        },
         "task_id": { "type": ["string", "null"] }
       }
     }

@@ -17,6 +17,7 @@ PoCs are not auto-run (no generic harness).
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -161,21 +162,69 @@ def _looks_unified(patch: str) -> bool:
     return "@@" in patch or patch.lstrip().startswith(("--- ", "diff "))
 
 
-def _apply_unified(target: Path, patch: str) -> tuple[bool, str]:
-    """Apply a real unified diff with `git apply`, trying -p1 then -p0."""
-    if shutil.which("git") is None:
-        return False, "git not available to apply unified diff"
+_HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$")
+
+
+def recount_hunks(patch: str) -> str:
+    """Rewrite each hunk header's line counts from the hunk body.
+
+    Model-written diffs often carry the right start lines but miscounted
+    lengths, which `git apply` rejects as a corrupt patch. Counts are derived
+    from the lines actually present: context and blank lines count on both
+    sides, ``-`` lines on the old side, ``+`` lines on the new side. Headers
+    without start lines are left alone.
+    """
+    lines = patch.rstrip("\n").split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _HUNK.match(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        body: list[str] = []
+        i += 1
+        while i < len(lines) and not lines[i].startswith(("@@", "--- ", "diff ")):
+            body.append(lines[i] if lines[i] else " ")  # blank context lost its space
+            i += 1
+        old = sum(1 for b in body if b[0] in " -")
+        new = sum(1 for b in body if b[0] in " +")
+        out.append(f"@@ -{m.group(1)},{old} +{m.group(2)},{new} @@{m.group(3)}")
+        out.extend(body)
+    return "\n".join(out) + "\n"
+
+
+def _git_apply(target: Path, patch: str) -> str | None:
+    """Try `git apply` with -p1 then -p0; return the strip that worked, or None."""
     patch_file = target / ".openplow.patch"
     patch_file.write_text(patch if patch.endswith("\n") else patch + "\n", encoding="utf-8")
-    for strip in ("-p1", "-p0"):
-        proc = subprocess.run(
-            ["git", "apply", "--unsafe-paths", strip, patch_file.name],
-            check=False, cwd=str(target), capture_output=True, text=True,
-        )
-        if proc.returncode == 0:
-            patch_file.unlink(missing_ok=True)
-            return True, f"git apply {strip}"
-    patch_file.unlink(missing_ok=True)
+    try:
+        for strip in ("-p1", "-p0"):
+            proc = subprocess.run(
+                ["git", "apply", "--unsafe-paths", strip, patch_file.name],
+                check=False, cwd=str(target), capture_output=True, text=True,
+            )
+            if proc.returncode == 0:
+                return strip
+        return None
+    finally:
+        patch_file.unlink(missing_ok=True)
+
+
+def _apply_unified(target: Path, patch: str) -> tuple[bool, str]:
+    """Apply a real unified diff with `git apply`, trying -p1 then -p0. If that
+    fails, retry once with the hunk headers' line counts recomputed."""
+    if shutil.which("git") is None:
+        return False, "git not available to apply unified diff"
+    strip = _git_apply(target, patch)
+    if strip:
+        return True, f"git apply {strip}"
+    fixed = recount_hunks(patch)
+    if fixed != patch:
+        strip = _git_apply(target, fixed)
+        if strip:
+            return True, f"git apply {strip} (hunk line counts recomputed)"
     return False, "git apply failed (-p1 and -p0)"
 
 

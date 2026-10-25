@@ -9,7 +9,10 @@ Three checks, and the validator can never file a finding itself:
   target (``openplow.poc``). Reproduction against untouched code is the ground
   truth; a PoC that tampers with source is rejected outright.
 * **Pass 2, adversarial.** A *fresh, isolated* agent — a different model from the
-  finder — tries to disprove the finding and returns an explicit verdict.
+  finder — tries to disprove the finding and returns an explicit verdict. A
+  validator that supports tool use gets the same read-only repo tools as the
+  finder, so it checks the claim against the code rather than the finding's
+  own quotes; its raw output goes to ``<out>/transcripts/validate/<id>.json``.
 
 The verdict combines them: a tampering PoC or one that fails to reproduce is
 rejected; an executed PoC that reproduces is confirmed unless the adversarial
@@ -18,11 +21,41 @@ model disproves it; a non-executable PoC falls back to the model verdict.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from .. import poc as poc_mod
 from ..context import RunContext
-from ..models import Outcome
+from ..models import ModelResponse, Outcome, served_model
+from ..repo_tools import RepoTools
+
+# Tool rounds the validator may spend reading code before it must answer.
+_MAX_TOOL_ROUNDS = 30
+
+_TOOLS_NOTE = (
+    "\n\nYou have read-only tools over the target repository: list_files, read_file "
+    "and grep (paths relative to the repo root). Check the finding against the actual "
+    "code — do not take its quoted code or line numbers on trust."
+)
+
+
+def _write_transcript(ctx: RunContext, finding: dict[str, Any], system: str, prompt: str,
+                      resp: ModelResponse) -> None:
+    """Persist the validator's raw output for later diagnosis."""
+    raw = resp.raw or {}
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(finding.get("id", "unknown")))
+    path = ctx.out_dir / "transcripts" / "validate" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "finding_id": finding.get("id"), "validator": ctx.validator.name,
+        "outcome": resp.outcome.value, "error": resp.error,
+        "stop_reason": raw.get("stop_reason"), "tool_rounds": raw.get("tool_rounds"),
+        "stop_details": raw.get("stop_details"), "served_by": raw.get("served_by"),
+        "fallbacks": raw.get("fallbacks"),
+        "system": system, "prompt": prompt, "text": resp.text,
+        "transcript": raw.get("transcript"),
+    }, indent=2, default=str), encoding="utf-8")
 
 
 def _pass1_deterministic(ctx: RunContext, finding: dict[str, Any]) -> list[str]:
@@ -47,11 +80,12 @@ def _pass1_deterministic(ctx: RunContext, finding: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, str]:
+def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, str, str | None]:
     """Ask a fresh validator model to disprove the finding.
 
-    Returns ``(verdict, notes)`` where verdict is one of ``confirmed``,
-    ``rejected``, or ``needs_validation``. The validator must end with a line
+    Returns ``(verdict, notes, served_by)`` where verdict is one of ``confirmed``,
+    ``rejected``, or ``needs_validation`` and ``served_by`` is the model that
+    wrote the verdict, when known. The validator must end with a line
     ``VERDICT: <value>``. The stub cannot judge, so a finding that clears Pass 1
     stays ``needs_validation`` — it is never auto-confirmed without a real
     adversarial check."""
@@ -66,14 +100,24 @@ def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, s
         "VERDICT: needs_validation (cannot resolve an exact fact)"
     )
     prompt = f"Finding to disprove:\n{finding}"
-    resp = ctx.validator.complete(system, prompt)
+    if ctx.validator.supports_tools:
+        system += _TOOLS_NOTE
+        resp = ctx.validator.complete_with_tools(system, prompt, RepoTools(ctx.repo),
+                                                 max_tokens=8192, max_rounds=_MAX_TOOL_ROUNDS)
+    else:
+        resp = ctx.validator.complete(system, prompt)
+    _write_transcript(ctx, finding, system, prompt, resp)
+    if (resp.raw or {}).get("stop_reason") == "refusal":
+        category = ((resp.raw or {}).get("stop_details") or {}).get("category")
+        ctx.store.add_wish(ctx.run_id, ctx.repo_name, "validate",
+                           f"validator refused on {finding.get('id')} (category: {category})")
     if resp.outcome is Outcome.RETRYABLE:
         raise RuntimeError("validator transient failure")
     if resp.text.strip() == "STUB_OK":
-        return "needs_validation", "stub validator: no adversarial judgment available"
+        return "needs_validation", "stub validator: no adversarial judgment available", None
 
     verdict = _parse_verdict(resp.text)
-    return verdict, resp.text[:800]
+    return verdict, resp.text[:800], served_model(resp)
 
 
 def _parse_verdict(text: str) -> str:
@@ -116,7 +160,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         return _reject(ctx, finding, finding_id, f"poc-execution: {run.reason}", run)
 
     # Adversarial model pass (can disprove even an executed PoC).
-    verdict, notes = _pass2_adversarial(ctx, finding)
+    verdict, notes, served_by = _pass2_adversarial(ctx, finding)
 
     if run.attempted and run.demonstrated:
         # Reproduced against untouched code. Confirm unless the model disproved it.
@@ -127,7 +171,8 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         # Only a confirmed finding keeps a severity; clear any the finder set.
         finding["severity"] = None
     finding["validation"] = {
-        "checked_by": ctx.validator.name, "disproof_attempted": True, "notes": notes,
+        "checked_by": ctx.validator.name, "served_by": served_by,
+        "disproof_attempted": True, "notes": notes,
         "poc_attempted": run.attempted, "poc_demonstrated": run.demonstrated,
         "poc_reason": run.reason,
     }
