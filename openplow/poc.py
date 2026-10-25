@@ -71,6 +71,17 @@ def _snapshot(root: Path, exclude: set[Path]) -> dict[str, str]:
     return snap
 
 
+def tree_digest(root: Path) -> str:
+    """One hash for the source tree under ``root`` (same files ``_snapshot`` sees).
+
+    A benchmark run records it for each target, so a later re-run of the fix gate
+    can tell whether the target it would run against is the one the run used."""
+    h = hashlib.sha256()
+    for rel, digest in _snapshot(root, exclude=set()).items():
+        h.update(f"{rel}\0{digest}\n".encode())
+    return h.hexdigest()
+
+
 def _tampered(root: Path, before: dict[str, str], exclude: set[Path]) -> bool:
     """True if any file present before the run was modified or removed. Files the
     exploit newly *creates* are not tampering — only edits to existing source are."""

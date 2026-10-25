@@ -180,6 +180,13 @@ model is called and no PoC is run:
 openplow rescore openplow-benchmarks --spec benchmarks/cve/benchmark.json
 ```
 
+Add `--rerun-fix-gate` to run the fix gate again on each confirmed finding that
+ships a patch. This runs code in the sandbox (`--sandbox unshare` for anything
+but the repo's own targets), still calls no model, and only makes sense when the
+targets are unchanged. A run records a hash of each target; the re-run refuses if
+a target differs. For a run made before hashes were recorded, pass
+`--assume-targets-unchanged` if you know the targets have not changed.
+
 See [`benchmarks/README.md`](benchmarks/README.md).
 
 ## Development

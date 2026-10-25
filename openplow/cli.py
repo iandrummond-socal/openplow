@@ -124,8 +124,10 @@ def cmd_rescore(args: argparse.Namespace) -> int:
     spec = load_spec(args.spec)
     out_dir = Path(args.out).resolve() if args.out else None
     try:
-        report = rescore(Path(args.run_dir), spec, out_dir)
-    except FileNotFoundError as exc:
+        report = rescore(Path(args.run_dir), spec, out_dir,
+                         rerun_fix_gate=args.rerun_fix_gate, sandbox_kind=args.sandbox,
+                         assume_targets_unchanged=args.assume_targets_unchanged)
+    except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     t = report.totals
@@ -137,6 +139,9 @@ def cmd_rescore(args: argparse.Namespace) -> int:
              f"false_positives={t['false_positives']}" if t.get("decoy_targets") else ""))
     if t["targets_not_in_run"]:
         print(f"not in this run (not scored): {', '.join(t['targets_not_in_run'])}")
+    if t.get("fix_gate_rerun"):
+        print(f"fix gate re-run on {t['fix_gate_run']} finding(s); "
+              f"{t['fix_gate_changed']} changed result")
     print(f"report: {(out_dir or Path(args.run_dir).resolve() / 'rescore') / 'benchmark-report.md'}")
     return 0
 
@@ -200,6 +205,13 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("run_dir", help="a benchmark output directory (has bench-*/findings.json)")
     rs.add_argument("--spec", required=True, help="the benchmark spec the run used")
     rs.add_argument("--out", default=None, help="report directory (default: RUN_DIR/rescore)")
+    rs.add_argument("--rerun-fix-gate", action="store_true",
+                    help="run the fix gate again on confirmed findings with a patch (runs "
+                         "code in the sandbox; the targets must be unchanged)")
+    rs.add_argument("--sandbox", default="stub", choices=["stub", "unshare"],
+                    help="sandbox for --rerun-fix-gate")
+    rs.add_argument("--assume-targets-unchanged", action="store_true",
+                    help="allow --rerun-fix-gate on a run that recorded no target hashes")
     rs.set_defaults(func=cmd_rescore)
 
     st = sub.add_parser("status", help="show a run's state")

@@ -54,6 +54,7 @@ from .context import RunContext
 from .db import Store
 from .models import MeteredAdapter, build_adapter
 from .orchestrator import start_run
+from .poc import tree_digest
 from .sandbox import build_sandbox
 
 
@@ -237,6 +238,7 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
 
     scores: list[TargetScore] = []
     skipped: list[str] = []
+    target_hashes: dict[str, str] = {}
     total_cost = 0.0
     cost_priced = True
     for target in spec.targets:
@@ -244,6 +246,7 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
             skipped.append(target.name)
             continue
         repo = (spec.base_dir / target.path).resolve()
+        target_hashes[target.name] = tree_digest(repo)
         run_id = f"bench-{target.name}-{uuid.uuid4().hex[:8]}"
         target_out = out_dir / run_id
         target_out.mkdir(parents=True, exist_ok=True)
@@ -271,6 +274,7 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
     report.totals["max_cost_usd"] = max_cost
     report.totals["cap_reached"] = bool(budget and budget.exhausted)
     report.totals["skipped_targets"] = skipped
+    report.totals["target_hashes"] = target_hashes
     _write_report(report, out_dir)
     return report
 
