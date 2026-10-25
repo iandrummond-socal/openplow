@@ -117,6 +117,30 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rescore(args: argparse.Namespace) -> int:
+    from .benchmark import load_spec
+    from .rescore import rescore
+
+    spec = load_spec(args.spec)
+    out_dir = Path(args.out).resolve() if args.out else None
+    try:
+        report = rescore(Path(args.run_dir), spec, out_dir)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    t = report.totals
+    print(f"recall={t['recall']:.0%} confirmed_recall={t['confirmed_recall']:.0%} "
+          f"rejection_rate={t['rejection_rate']:.0%} "
+          f"unmatched_confirmed={t['unmatched_confirmed']} "
+          f"duplicates_folded={t['duplicates_folded']} fix_verified={t['fix_verified']}"
+          + (f" decoys_clean={t['decoys_clean']}/{t['decoy_targets']} "
+             f"false_positives={t['false_positives']}" if t.get("decoy_targets") else ""))
+    if t["targets_not_in_run"]:
+        print(f"not in this run (not scored): {', '.join(t['targets_not_in_run'])}")
+    print(f"report: {(out_dir or Path(args.run_dir).resolve() / 'rescore') / 'benchmark-report.md'}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     store = _store()
     run = store.get_run(args.run_id)
@@ -170,6 +194,13 @@ def build_parser() -> argparse.ArgumentParser:
     bm.add_argument("--max-cost", type=float, default=None, metavar="USD",
                     help="spending cap shared by all targets; later targets are skipped")
     bm.set_defaults(func=cmd_benchmark)
+
+    rs = sub.add_parser("rescore", help="re-score a saved benchmark run with the current "
+                                        "dedup and scoring rules (no model calls)")
+    rs.add_argument("run_dir", help="a benchmark output directory (has bench-*/findings.json)")
+    rs.add_argument("--spec", required=True, help="the benchmark spec the run used")
+    rs.add_argument("--out", default=None, help="report directory (default: RUN_DIR/rescore)")
+    rs.set_defaults(func=cmd_rescore)
 
     st = sub.add_parser("status", help="show a run's state")
     st.add_argument("run_id")
