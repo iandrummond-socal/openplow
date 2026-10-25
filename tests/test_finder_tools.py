@@ -393,3 +393,26 @@ def test_validation_records_serving_model(tmp_path, repo):
     validate.run_task(ctx, {"finding_id": "cmd-1"})
     v = ctx.store.findings("run-t")[0]["validation"]
     assert v["checked_by"] == "tool-validator" and v["served_by"] == "claude-opus-4-8"
+
+
+# ---- tool output caps ---------------------------------------------------------
+
+def test_read_file_reaches_lines_past_the_size_cap(tmp_path):
+    root = tmp_path / "big"
+    root.mkdir()
+    (root / "gen.py").write_text("# padding\n" * 30000 + "os.system(cmd)\n")
+    tools = RepoTools(root)
+    assert "os.system(cmd)" in tools.call("read_file", {"path": "gen.py", "start_line": 30001})
+    whole = tools.call("read_file", {"path": "gen.py"})
+    assert len(whole.encode()) < 210_000 and "start_line=" in whole
+    assert "gen.py:30001: os.system(cmd)" in tools.call("grep", {"pattern": "os.system"})
+
+
+def test_grep_output_is_bounded(tmp_path):
+    root = tmp_path / "min"
+    root.mkdir()
+    for i in range(50):
+        (root / f"m{i}.js").write_text("var x=1;" * 25000 + "\n")
+    out = RepoTools(root).call("grep", {"pattern": "var x"})
+    assert len(out.encode()) < 210_000
+    assert "line truncated" in out

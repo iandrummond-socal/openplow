@@ -8,8 +8,9 @@ into its own wire format and calls :meth:`RepoTools.call` for each request.
 
 Every path is resolved against the repository root and refused if it escapes
 it (``..``, absolute paths, symlinks pointing outside). Nothing here writes.
-Outputs are capped so one call cannot flood the model's context; a capped
-output says so.
+Outputs are capped by size so one call cannot flood the model's context; a
+capped output says so, and ``read_file`` takes a line range so a large file can
+be paged through.
 """
 
 from __future__ import annotations
@@ -18,9 +19,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-_MAX_READ_BYTES = 200_000
+_MAX_OUTPUT_BYTES = 200_000   # cap on any one tool result
 _MAX_LIST_ENTRIES = 500
 _MAX_GREP_MATCHES = 200
+_MAX_GREP_LINE_CHARS = 500    # long (e.g. minified) matching lines are cut
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 
 
@@ -125,16 +127,22 @@ class RepoTools:
         target = self._resolve(path)
         if not target.is_file():
             raise ToolError(f"not a file: {path}")
-        data = target.read_bytes()
-        truncated = len(data) > _MAX_READ_BYTES
-        text = data[:_MAX_READ_BYTES].decode("utf-8", errors="replace")
-        lines = text.splitlines()
+        lines = target.read_bytes().decode("utf-8", errors="replace").splitlines()
         first = max(start_line or 1, 1)
         last = min(end_line or len(lines), len(lines))
-        body = "\n".join(f"{i:>5}  {lines[i - 1]}" for i in range(first, last + 1))
-        if truncated:
-            body += f"\n... (file truncated at {_MAX_READ_BYTES} bytes)"
-        return body or "(empty file)"
+        # Select the range first, then cap the output, so any line is reachable.
+        out: list[str] = []
+        size = 0
+        for i in range(first, last + 1):
+            row = f"{i:>5}  {lines[i - 1]}"
+            size += len(row.encode("utf-8")) + 1
+            if size > _MAX_OUTPUT_BYTES and out:
+                out.append(f"... (output truncated at {_MAX_OUTPUT_BYTES} bytes; "
+                           f"call again with start_line={i} to continue; "
+                           f"file has {len(lines)} lines)")
+                break
+            out.append(row)
+        return "\n".join(out) or "(empty file)"
 
     def grep(self, pattern: str, path: str = ".") -> str:
         try:
@@ -144,17 +152,24 @@ class RepoTools:
         base = self._resolve(path)
         files = [base] if base.is_file() else sorted(self._walk(base))
         out: list[str] = []
+        size = 0
         for f in files:
             try:
-                text = f.read_bytes()[:_MAX_READ_BYTES].decode("utf-8", errors="replace")
+                text = f.read_bytes().decode("utf-8", errors="replace")
             except OSError:
                 continue
             for n, line in enumerate(text.splitlines(), 1):
-                if rx.search(line):
-                    out.append(f"{self._rel(f)}:{n}: {line}")
-                    if len(out) >= _MAX_GREP_MATCHES:
-                        out.append(f"... (truncated at {_MAX_GREP_MATCHES} matches)")
-                        return "\n".join(out)
+                if not rx.search(line):
+                    continue
+                if len(line) > _MAX_GREP_LINE_CHARS:
+                    line = line[:_MAX_GREP_LINE_CHARS] + " ...(line truncated)"
+                row = f"{self._rel(f)}:{n}: {line}"
+                size += len(row.encode("utf-8")) + 1
+                if len(out) >= _MAX_GREP_MATCHES or size > _MAX_OUTPUT_BYTES:
+                    out.append(f"... (truncated at {len(out)} matches; narrow the "
+                               "pattern or path)")
+                    return "\n".join(out)
+                out.append(row)
         return "\n".join(out) if out else "(no matches)"
 
     # ---- helpers ------------------------------------------------------------
