@@ -10,16 +10,17 @@ runnable offline in the sandbox. The point is to check whether OpenPlow finds
 the defect, confirms it by running a PoC against the untouched code, and
 verifies the shipped fix with the fail→pass patch gate.
 
-| Target | Advisory | Defect | Fix |
+| Target (directory) | Advisory | Defect | Fix |
 | --- | --- | --- | --- |
-| `cve-2007-4559-tarfile` | CVE-2007-4559 | `tarfile.extractall` trusts member names → directory traversal | validate each member resolves inside dest |
-| `zip-slip` | Zip Slip (Snyk, 2018) · CWE-22 | manual zip extraction joins entry name without checking → traversal | check the resolved path stays under dest |
-| `sqli-sqlite` | CWE-89 (representative of many CVEs) | user input string-formatted into SQL → auth bypass | parameterized query |
-| `cmd-injection` | CWE-78 (representative of many CVEs) | host interpolated into a `shell=True` command → RCE | pass an argv list, no shell |
+| `cve-2007-4559-tarfile` (`tar-unpack`) | CVE-2007-4559 | `tarfile.extractall` trusts member names → directory traversal | validate each member resolves inside dest |
+| `zip-slip` (`zip-unpack`) | Zip Slip (Snyk, 2018) · CWE-22 | manual zip extraction joins entry name without checking → traversal | check the resolved path stays under dest |
+| `sqli-sqlite` (`sqlite-auth`) | CWE-89 (representative of many CVEs) | user input string-formatted into SQL → auth bypass | parameterized query |
+| `cmd-injection` (`host-ping`) | CWE-78 (representative of many CVEs) | host interpolated into a `shell=True` command → RCE | pass an argv list, no shell |
 
-The target source carries no hints: no `VULN` comments and no docstrings
-naming the advisory, because the finder reads the source and would be told the
-answer. Real-model results from before this change (runs 1–5 in PR #1) were
+The targets carry no hints: no `VULN` comments, no docstrings naming the
+advisory, and neutral directory names (the directory name is the repo name the
+finder sees in its prompt), because the finder would otherwise be told the
+answer. The target names in the spec and reports keep the advisory names. Real-model results from before this change (runs 1–5 in PR #1) were
 measured *with* those hints, so they overstate recall and are not directly
 comparable with later runs.
 

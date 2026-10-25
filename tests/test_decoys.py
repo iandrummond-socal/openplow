@@ -44,9 +44,9 @@ def test_decoy_suite_is_clean_and_rejects_by_running_the_exploit(tmp_path):
 
 # The decoy exploits must be real: each one breaks the matching vulnerable target.
 @pytest.mark.parametrize("finding_id,cve_target", [
-    ("decoy-tar-traversal", "cve-2007-4559-tarfile"),
-    ("decoy-zip-slip", "zip-slip"),
-    ("decoy-cmd-injection", "cmd-injection"),
+    ("decoy-tar-traversal", "tar-unpack"),
+    ("decoy-zip-slip", "zip-unpack"),
+    ("decoy-cmd-injection", "host-ping"),
 ])
 def test_decoy_exploit_breaks_the_vulnerable_target(tmp_path, finding_id, cve_target):
     hunts = json.loads(DECOY_FIXTURE.read_text())["hunts"]
