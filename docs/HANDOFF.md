@@ -71,7 +71,7 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 | Needs | Task |
 | --- | --- |
 | no credits | Sandbox: hide `/run`, `/tmp` and `/var/run` (planned as checkpoint 2, skipped; until it lands, `allow_unix_sockets=True` leaves host sockets there reachable) |
-| no credits | Sandbox: automated isolation PoC tests (`tests/test_sandbox_isolation.py`); the `/dev`, `/proc` and unix-socket behaviour was proven by hand probes only |
+| no credits | Sandbox bug: as a non-root user `> /dev/null` fails (EACCES on `open(O_CREAT)` of a minimal-`/dev` node); root is fine. Caused by `minimal_dev` (passes with `minimal_dev=False`). `tests/test_sandbox_isolation.py::test_dev_null_can_be_redirected_to` is a strict xfail for non-root: when it is fixed the test XPASSes and fails the run until the marker is removed |
 | no credits | Sandbox: minimal read-only root (hide `$HOME` reads), `systemd-run --user` memory cap for desktop Linux, a non-privileged Linux CI job, loopback networking, runtime verification on x86_64 (roadmap M1) |
 
 Sandbox state: done on Linux are the read-only target, capability drop, seccomp,
