@@ -1,0 +1,37 @@
+{
+  "name": "openplow-upstream",
+  "targets": [
+    {
+      "name": "cpython-zip-ancestry-dos",
+      "path": "targets/archive-tree",
+      "expected": [
+        {
+          "id": "ancestry-dos",
+          "file": "ziptree/__init__.py",
+          "attack_class": "resource-exhaustion-and-availability",
+          "symbol": "_ancestry",
+          "line_range": [
+            39,
+            60
+          ]
+        }
+      ]
+    },
+    {
+      "name": "pyjwt-hmac-key-confusion",
+      "path": "targets/token-verify",
+      "expected": [
+        {
+          "id": "hmac-key-confusion",
+          "file": "tokenlib/algorithms.py",
+          "attack_class": "web-protocol-and-auth",
+          "symbol": "prepare_key",
+          "line_range": [
+            183,
+            205
+          ]
+        }
+      ]
+    }
+  ]
+}

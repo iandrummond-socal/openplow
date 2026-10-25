@@ -16,6 +16,9 @@ manifests.
   [`decoys/README.md`](decoys/README.md).
 - `cve-and-decoys.json` — both suites in one run, so one report shows recall
   and false positives together.
+- `upstream/` — real project source at the commit *before* a security fix
+  (zipp DoS, PyJWT key confusion), renamed so the finder cannot recognize the
+  project. See [`upstream/README.md`](upstream/README.md).
 
 ## Run the sample
 
