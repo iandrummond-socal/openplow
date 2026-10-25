@@ -16,9 +16,9 @@ sandbox for running target code.
 > Every model call's raw output is saved for diagnosis. Refused requests fall back
 > to another model. Prompts are cached, and a spending cap stops a run before it
 > overspends. The benchmark measures recall on CVE reproductions and false
-> positives on bug-free decoys. Remaining M1 work is hardening the `unshare`
-> sandbox. See [`docs/ROADMAP.md`](docs/ROADMAP.md), and
-> [`docs/HANDOFF.md`](docs/HANDOFF.md) for the current state and next steps.
+> positives on bug-free decoys. The `unshare` sandbox is read-only outside
+> scratch, drops capabilities and filters syscalls; a cgroup memory cap remains. See
+> [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/HANDOFF.md`](docs/HANDOFF.md) for the current state and next steps.
 
 ## Why a harness and not just the skill
 
@@ -202,7 +202,8 @@ pinned in the `dev` extra.
 | `openplow/db.py` | SQLite state store keyed by `(run_id, repo, stage)` |
 | `openplow/models.py` | Model adapters (stub, fixture, Anthropic with tool loop, caching, fallback), metering |
 | `openplow/repo_tools.py` | Read-only, root-confined `list_files` / `read_file` / `grep` for the models |
-| `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps (stub + unshare) |
+| `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps, and for `unshare` a read-only filesystem, no capabilities and a seccomp denylist |
+| `openplow/_sandbox_init.py` | Runs inside the `unshare` namespaces: read-only remount, capability drop, seccomp filter, then `exec` |
 | `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects tampering; fail→pass patch gate |
 | `openplow/stages/` | `recon`, `hunt`, `validate`, `gapfill`, `dedup`, `report` |
 | `openplow/benchmark.py` | Runs the pipeline over known-vuln and decoy targets; scores recall, noise, false positives |
