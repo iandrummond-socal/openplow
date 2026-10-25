@@ -18,14 +18,24 @@ bar → **Edit**):
    package managers** ticked (so `pip` can install the extras). Broader levels
    already allow it.
 
+> **Key name.** Some cloud environments reserve `ANTHROPIC_API_KEY` for Claude
+> Code's own login and don't pass it to the session. If so, store the key as
+> `OPENPLOW_ANTHROPIC_API_KEY` and map it at run time:
+> `ANTHROPIC_API_KEY="$OPENPLOW_ANTHROPIC_API_KEY" scripts/run_real.sh ...`.
+> Never print the value.
+
 ## What the session runs
 
 The session clones this repo and runs the CVE benchmark against real models:
 
 ```bash
 export ANTHROPIC_API_KEY   # already set as an env secret
-OPENPLOW_SANDBOX=stub scripts/run_real.sh --benchmark benchmarks/cve/benchmark.json
+OPENPLOW_SANDBOX=stub OPENPLOW_MAX_COST=6.00 \
+  scripts/run_real.sh --benchmark benchmarks/cve/benchmark.json
 ```
+
+Set `OPENPLOW_MAX_COST` below your remaining API credit. A full four-target CVE
+run cost about $4.50 before prompt caching was added.
 
 Defaults: finder `claude-opus-5-5`, validator `claude-sonnet-5-5`, effort
 `high`. The script installs the `anthropic` + `schema` extras, runs the four CVE
