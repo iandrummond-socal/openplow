@@ -14,7 +14,7 @@
         },
         "location": {
           "file": "src/extract.py",
-          "line": 11,
+          "line": 9,
           "symbol": "extract"
         },
         "description": "extract() calls tarfile.extractall without validating member names, so '../' members write outside dest.",
@@ -37,7 +37,7 @@
         },
         "location": {
           "file": "src/unzip.py",
-          "line": 14,
+          "line": 10,
           "symbol": "unzip"
         },
         "description": "unzip() joins the entry name onto dest without checking the resolved path, so '../' entries escape.",
@@ -62,7 +62,7 @@
         },
         "location": {
           "file": "src/auth.py",
-          "line": 14,
+          "line": 9,
           "symbol": "login"
         },
         "description": "login() builds the SQL by string formatting, so a crafted password makes the WHERE clause always true.",
@@ -87,7 +87,7 @@
         },
         "location": {
           "file": "src/net.py",
-          "line": 11,
+          "line": 7,
           "symbol": "ping"
         },
         "description": "ping() interpolates host into a shell=True command, so '; <cmd>' runs arbitrary commands.",

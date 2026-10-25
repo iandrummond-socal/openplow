@@ -3,7 +3,7 @@
   "targets": [
     {
       "name": "cve-2007-4559-tarfile",
-      "path": "targets/cve-2007-4559-tarfile",
+      "path": "targets/tar-unpack",
       "expected": [
         {"id": "cve-2007-4559", "file": "src/extract.py",
          "attack_class": "data-isolation-and-lifecycle",
@@ -12,7 +12,7 @@
     },
     {
       "name": "zip-slip",
-      "path": "targets/zip-slip",
+      "path": "targets/zip-unpack",
       "expected": [
         {"id": "zip-slip", "file": "src/unzip.py",
          "attack_class": "data-isolation-and-lifecycle",
@@ -21,7 +21,7 @@
     },
     {
       "name": "sqli-sqlite",
-      "path": "targets/sqli-sqlite",
+      "path": "targets/sqlite-auth",
       "expected": [
         {"id": "sqli", "file": "src/auth.py",
          "attack_class": "web-protocol-and-auth",
@@ -30,7 +30,7 @@
     },
     {
       "name": "cmd-injection",
-      "path": "targets/cmd-injection",
+      "path": "targets/host-ping",
       "expected": [
         {"id": "cmd-injection", "file": "src/net.py",
          "attack_class": "cloud-and-deployment",
