@@ -15,8 +15,10 @@ Metrics per target and in aggregate:
 * **unmatched confirmed** — confirmed findings matching no known vuln (either a
   false positive or a genuinely new bug; a benchmark cannot tell which)
 
-A finding matches a known vuln when they share the file and attack class, and —
-when the manifest gives one — the symbol or a line within the given range.
+A finding matches a known vuln when they share the file and — when the manifest
+gives one — the symbol or a line within the given range. The attack class is not
+compared: the same bug is legitimately found from several class angles, and the
+manifest's ``attack_class`` is informational.
 
 Spec format (JSON)::
 
@@ -96,8 +98,6 @@ def _norm(path: str) -> str:
 def matches(finding: dict[str, Any], exp: ExpectedVuln) -> bool:
     loc = finding.get("location") or {}
     if _norm(loc.get("file", "")) != _norm(exp.file):
-        return False
-    if finding.get("attack_class") != exp.attack_class:
         return False
     if exp.symbol:
         hay = f"{loc.get('symbol', '')} {finding.get('title', '')} {finding.get('description', '')}"

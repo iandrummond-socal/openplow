@@ -21,6 +21,10 @@
       "type": "string",
       "description": "One of the attack classes from the skill's class files (e.g. web-auth, memory-safety, llm, supply-chain)."
     },
+    "weakness": {
+      "type": ["string", "null"],
+      "description": "The hunter's own label for the weakness (e.g. 'OS command injection (CWE-78)'). attack_class is the hunt cell's class."
+    },
     "severity": {
       "type": ["string", "null"],
       "enum": ["critical", "high", "medium", "low", "info", null],

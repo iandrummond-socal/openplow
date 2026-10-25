@@ -64,13 +64,20 @@ _SYSTEM = (
     "Return ONLY a JSON array of findings in a ```json fenced block. Each finding "
     "must have: id, verdict (always \"needs_validation\"), title, attack_class, "
     "threat_model {attacker, boundary}, location {file, line, symbol}, description, "
-    "poc {kind, content, observed}, patch.\n\n"
+    "poc {kind, content, observed}, patch. Optionally add weakness: your own label "
+    "for the bug (e.g. a CWE); attack_class is set to the class you were asked to hunt.\n\n"
     "poc.kind is the PoC's role, not its language, and must be one of: "
     "\"test\" or \"script\" (a Python file, run with python3 from the repo root "
     "against the untouched code; it must exit 0 and print the \"observed\" text), "
     "\"input\" (a malicious input to feed the target) or \"trace\" (a step-by-step "
     "path through the code). Only test and script PoCs are executed and can verify "
-    "a patch, so use one of them whenever the issue can be demonstrated in Python."
+    "a patch, so use one of them whenever the issue can be demonstrated in Python. "
+    "\"observed\" is matched as an exact substring of the PoC's output, so make it a "
+    "fixed marker the PoC always prints when the issue reproduces (e.g. \"ESCAPED\"): "
+    "no placeholders, temporary paths, timestamps or other values that change per run."
+    "\n\npatch must be a unified diff that applies with `git apply` from the repo root: "
+    "--- a/<path> and +++ b/<path> headers, and every hunk header with line numbers "
+    "(@@ -start,count +start,count @@) and context lines copied exactly from the file."
 )
 
 # Language names a model may put in poc.kind. Only Python maps cleanly: test and
@@ -181,7 +188,12 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
             continue
         _normalize_poc_kind(finding)
         finding["verdict"] = "needs_validation"
-        finding.setdefault("attack_class", attack_class)
+        # The cell's class is the finding's class; the model's own label (often a
+        # free-text CWE description) is kept as the weakness.
+        label = finding.get("attack_class")
+        if isinstance(label, str) and label != attack_class and not finding.get("weakness"):
+            finding["weakness"] = label
+        finding["attack_class"] = attack_class
         finding["provenance"] = {
             "run_id": ctx.run_id, "repo": ctx.repo_name, "stage": "hunt",
             "finder_model": ctx.finder.name, "task_id": f"hunt:{area}:{attack_class}",

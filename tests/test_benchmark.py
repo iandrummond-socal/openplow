@@ -18,14 +18,15 @@ FIXTURE = Path(__file__).resolve().parent.parent / "benchmarks" / "sample" / "fi
 
 # ---- matching / scoring -------------------------------------------------
 
-def test_matches_file_and_class():
+def test_matches_file_regardless_of_class():
     exp = ExpectedVuln(id="v", file="src/app.py", attack_class="web-protocol-and-auth")
     assert bm.matches({"location": {"file": "src/app.py"},
                        "attack_class": "web-protocol-and-auth"}, exp)
     assert not bm.matches({"location": {"file": "src/other.py"},
                            "attack_class": "web-protocol-and-auth"}, exp)
-    assert not bm.matches({"location": {"file": "src/app.py"},
-                           "attack_class": "client-side"}, exp)
+    # the same bug found from another class angle still counts
+    assert bm.matches({"location": {"file": "src/app.py"},
+                       "attack_class": "client-side"}, exp)
 
 
 def test_matches_symbol_and_line_range():

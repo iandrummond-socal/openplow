@@ -249,3 +249,20 @@ def test_system_prompt_lists_poc_kinds(tmp_path, repo):
     hunt.run_task(_ctx(tmp_path, repo, finder),
                   {"area": "src", "attack_class": "cloud-and-deployment"})
     assert all(k in (finder.system or "") for k in ('"test"', '"script"', '"input"', '"trace"'))
+
+
+def test_cell_class_wins_and_model_label_kept_as_weakness(tmp_path, repo):
+    f = _finding("script")
+    f["attack_class"] = "OS command injection (CWE-78)"
+    ctx = _ctx(tmp_path, repo, _ToolFinder("```json\n" + json.dumps([f]) + "\n```"))
+    hunt.run_task(ctx, {"area": "src", "attack_class": "client-side"})
+    stored = ctx.store.findings("run-t")[0]
+    assert stored["attack_class"] == "client-side"
+    assert stored["weakness"] == "OS command injection (CWE-78)"
+
+
+def test_system_prompt_states_observed_and_patch_rules(tmp_path, repo):
+    finder = _ToolFinder("[]")
+    hunt.run_task(_ctx(tmp_path, repo, finder),
+                  {"area": "src", "attack_class": "cloud-and-deployment"})
+    assert "exact substring" in finder.system and "@@ -start,count +start,count @@" in finder.system
