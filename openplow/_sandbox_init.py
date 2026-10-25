@@ -1,16 +1,30 @@
 """Launcher that runs *inside* the ``unshare`` namespaces, just before the payload.
 
 ``UnshareSandbox`` runs this file as ``python3 -I _sandbox_init.py ... -- cmd``.
-It tightens the process in four steps, then ``exec``s the command:
+It tightens the process in these steps, then ``exec``s the command:
 
-1. Make the filesystem read-only, except the paths passed with ``--rw``; then
+1. Replace ``/dev`` with a minimal tmpfs holding only ``null zero full random
+   urandom tty``, a private ``devpts`` and ``/dev/shm``, and the ``fd`` and
+   ``std*`` symlinks, so the host's other device nodes (``kmsg``, ``mem``,
+   ``loop*`` ...) are not present. Toggled off with ``--no-minimal-dev``.
+2. Harden ``/proc``: bind the subtrees that change kernel state read-only
+   (``sys``, ``sysrq-trigger`` ...) and mask the parts that leak host state
+   (``kcore``, ``keys`` ...). ``/proc`` itself stays writable, because
+   ``/proc/self/oom_score_adj`` and ``comm`` are legitimate. ``--no-proc-harden``.
+3. Make the filesystem read-only, except the paths passed with ``--rw``; then
    make the paths passed with ``--ro`` read-only again, even inside a ``--rw``
-   tree (the target under test lives in the scratch dir).
-2. Drop every capability from the bounding set. The payload is "root" inside a
+   tree (the target under test lives in the scratch dir). This also remounts the
+   new ``/dev`` read-only, leaving ``/dev/shm`` and ``/dev/pts`` writable.
+4. Drop every capability from the bounding set. The payload is "root" inside a
    user namespace; without this it could still remount or reconfigure things.
-3. Set ``no_new_privs`` and load a seccomp denylist (mount, ptrace, bpf, module
+5. Set ``no_new_privs`` and load a seccomp denylist (mount, ptrace, bpf, module
    loading, namespace creation, io_uring and similar).
-4. ``exec`` the command.
+6. ``exec`` the command.
+
+Steps 1 and 2 run before step 3 so that every later step sees the final mount
+tree. Each ``/dev`` or ``/proc`` replacement is assembled in a throwaway
+``tempfile.mkdtemp`` staging dir under the first ``--rw`` path and rbound over
+its target; with no ``--rw`` path to stage under, the launcher fails closed.
 
 Why a separate file: the mounts and the seccomp filter must go in *after* the
 namespaces are set up, and the filter would block ``unshare`` and ``mount``
@@ -33,6 +47,7 @@ import os
 import platform
 import struct
 import sys
+import tempfile
 
 # ---- mount flags (linux/mount.h) -----------------------------------------
 MS_RDONLY = 1
@@ -45,17 +60,23 @@ MS_NODIRATIME = 2048
 MS_BIND = 4096
 MS_REC = 16384
 MS_RELATIME = 1 << 21
+MNT_DETACH = 2  # umount2(2): lazy unmount
 
 _OPT_FLAGS = {
     "nosuid": MS_NOSUID, "nodev": MS_NODEV, "noexec": MS_NOEXEC,
     "noatime": MS_NOATIME, "nodiratime": MS_NODIRATIME, "relatime": MS_RELATIME,
 }
 
-# Mounts left as they are. /sys is NOT here: its cgroup filesystem is writable, and
-# the payload's cgroup leaf maps to root inside the user namespace, so the payload
-# could otherwise raise its own memory.max. The cgroup join happens in the parent,
-# before unshare, so the payload never needs to write there.
-_SKIP_PREFIXES = ("/proc", "/dev")
+# Mounts make_readonly leaves as they are. /proc stays writable because the payload
+# legitimately writes /proc/self/oom_score_adj and /proc/self/comm; harden_proc has
+# already pinned its dangerous parts read-only. /dev/shm and /dev/pts are the
+# payload's own private tmpfs and devpts from minimal_dev, left writable so shared
+# memory and ptys work; the rest of the new /dev IS remounted read-only, which still
+# allows device writes such as /dev/null. /sys is NOT here: its cgroup filesystem is
+# writable, and the payload's cgroup leaf maps to root inside the user namespace, so
+# the payload could otherwise raise its own memory.max. The cgroup join happens in
+# the parent, before unshare, so the payload never needs to write there.
+_SKIP_PREFIXES = ("/proc", "/dev/shm", "/dev/pts")
 
 # ---- seccomp -------------------------------------------------------------
 PR_SET_NO_NEW_PRIVS = 38
@@ -187,9 +208,10 @@ def _fail(msg: str) -> None:
     sys.exit(125)
 
 
-def _mount(libc, source, target, fstype, flags) -> None:
+def _mount(libc, source, target, fstype, flags, data=None) -> None:
     rc = libc.mount(source.encode() if source else None, target.encode(),
-                    fstype.encode() if fstype else None, ctypes.c_ulong(flags), None)
+                    fstype.encode() if fstype else None, ctypes.c_ulong(flags),
+                    data.encode() if data else None)
     if rc != 0:
         err = ctypes.get_errno()
         _fail(f"mount {target!r} (flags {flags:#x}) failed: {os.strerror(err)}")
@@ -239,6 +261,12 @@ def make_readonly(rw_paths: list[str], ro_paths: list[str] = ()) -> None:
     for mountpoint, flags in _mounts():
         if mountpoint.startswith(_SKIP_PREFIXES):
             continue
+        # A mount buried under a newer one (the host's /dev/mqueue once minimal_dev
+        # has rbound a fresh tree over /dev) stays in mountinfo, but its path no
+        # longer exists, so it can neither be remounted nor reached by the payload.
+        # Any mount still reachable by path falls through and fails closed below.
+        if not os.path.lexists(mountpoint):
+            continue
         if any(_within(mountpoint, p) for p in rw):
             continue
         _mount(libc, None, mountpoint, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
@@ -247,6 +275,100 @@ def make_readonly(rw_paths: list[str], ro_paths: list[str] = ()) -> None:
         # Remounting an unprivileged bind must keep the flags it inherited.
         flags = max((f for m, f in _mounts() if m == path), default=0)
         _mount(libc, None, path, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
+
+
+def _stage(scratch: str) -> str:
+    """Return a fresh, tmpfs-backed staging directory under ``scratch``.
+
+    A replacement tree is assembled here and then rbound over its target. The
+    name is unique per call (``mkdtemp``), so two sandboxes sharing one scratch
+    dir never collide and a directory left by a crashed run never causes EEXIST.
+    Each caller uses its stage once, then detaches and removes it.
+    """
+    try:
+        stage = tempfile.mkdtemp(prefix=".openplow-stage-", dir=scratch)
+    except OSError as exc:
+        _fail(f"could not create a staging directory in {scratch!r}: {exc}")
+    _mount(_libc(), "tmpfs", stage, "tmpfs", 0)
+    return stage
+
+
+def _drop_stage(libc, stage: str) -> None:
+    # The rbind over the target keeps its own reference to the tmpfs, so the
+    # staging mountpoint can go; leftovers are harmless, so errors are ignored.
+    libc.umount2(stage.encode(), MNT_DETACH)
+    try:
+        os.rmdir(stage)
+    except OSError:
+        pass
+
+
+def minimal_dev(stage: str) -> None:
+    """Replace ``/dev`` with a tree holding only the nodes a payload needs.
+
+    The host's ``/dev`` exposes ``kmsg`` (writable as real root), ``mem``,
+    ``loop*``, ``fuse`` and more. The new one has six safe character devices
+    bound in from the host, a private ``devpts`` and ``/dev/shm`` (so the
+    payload shares neither ptys nor shared memory with the host), and the usual
+    ``fd``/``std*`` symlinks. ``stage`` comes from ``_stage``.
+    """
+    libc = _libc()
+    for node in ("null", "zero", "full", "random", "urandom", "tty"):
+        dst = os.path.join(stage, node)
+        try:
+            os.close(os.open(dst, os.O_CREAT | os.O_WRONLY, 0o600))
+        except OSError as exc:
+            _fail(f"could not create {dst!r}: {exc}")
+        _mount(libc, f"/dev/{node}", dst, None, MS_BIND)
+    try:
+        pts = os.path.join(stage, "pts")
+        os.mkdir(pts)
+        shm = os.path.join(stage, "shm")
+        os.mkdir(shm)
+        for name, link in (("fd", "/proc/self/fd"), ("stdin", "/proc/self/fd/0"),
+                           ("stdout", "/proc/self/fd/1"), ("stderr", "/proc/self/fd/2"),
+                           ("ptmx", "pts/ptmx")):
+            os.symlink(link, os.path.join(stage, name))
+    except OSError as exc:
+        _fail(f"could not build the minimal /dev: {exc}")
+    # A kernel may refuse a new devpts instance. Ptys are then unavailable, but the
+    # rest of the minimal /dev is still far better than the host's, so skip it.
+    libc.mount(b"devpts", pts.encode(), b"devpts", ctypes.c_ulong(0),
+               b"newinstance,ptmxmode=0666,mode=620")
+    _mount(libc, "tmpfs", shm, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC,
+           "mode=1777,size=64m")
+    _mount(libc, stage, "/dev", None, MS_BIND | MS_REC)
+    _drop_stage(libc, stage)
+
+
+def harden_proc() -> None:
+    """Pin the parts of ``/proc`` that change kernel state read-only; mask leaks.
+
+    As real root, ``--map-root-user`` maps the payload onto the owner of
+    ``/proc/sys`` and ``/proc/sysrq-trigger``, and the kernel checks ownership,
+    not capability, so ``kernel.core_pattern`` (host-global, a code-execution
+    route) would be writable. These follow the OCI runtime default lists.
+    ``/proc`` itself stays writable for ``/proc/self/oom_score_adj`` and
+    ``comm``. A path this kernel does not have is skipped, never an error.
+    """
+    libc = _libc()
+    for name in ("/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"):
+        path = os.path.realpath(name)
+        if not os.path.exists(path):
+            continue
+        _mount(libc, path, path, None, MS_BIND | MS_REC)
+        # Remounting an unprivileged bind must keep the flags it inherited.
+        flags = max((f for m, f in _mounts() if m == path), default=0)
+        _mount(libc, None, path, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
+    for name in ("/proc/kcore", "/proc/keys", "/proc/timer_list", "/proc/sched_debug",
+                 "/proc/scsi", "/proc/acpi"):
+        path = os.path.realpath(name)
+        if not os.path.exists(path):
+            continue
+        if os.path.isdir(path):
+            _mount(libc, "tmpfs", path, "tmpfs", MS_RDONLY)
+        else:
+            _mount(libc, "/dev/null", path, None, MS_BIND)
 
 
 def drop_capabilities() -> None:
@@ -283,6 +405,7 @@ def main(argv: list[str]) -> None:
     ro: list[str] = []
     status_fd: int | None = None
     readonly = seccomp = True
+    do_minimal_dev = do_proc_harden = True
     i = 0
     while i < len(argv) and argv[i] != "--":
         if argv[i] == "--rw":
@@ -300,6 +423,14 @@ def main(argv: list[str]) -> None:
         elif argv[i] == "--no-seccomp":
             seccomp = False
             i += 1
+        elif argv[i] == "--no-minimal-dev":
+            do_minimal_dev = False
+            i += 1
+        elif argv[i] == "--no-proc-harden":
+            do_proc_harden = False
+            i += 1
+        elif argv[i] in ("--no-host-dirs", "--allow-unix-sockets"):
+            i += 1  # part of the launcher contract; wired in by later checkpoints
         else:
             _fail(f"unknown option {argv[i]!r}")
     command = argv[i + 1:]
@@ -307,6 +438,16 @@ def main(argv: list[str]) -> None:
         _fail("no command given")
 
     applied: list[str] = []
+    # /dev and /proc go first so make_readonly sees the final tree: the new /dev is
+    # a fresh mount that it then remounts read-only.
+    if do_minimal_dev:
+        if not rw:
+            _fail("a minimal /dev needs a writable --rw path to stage under")
+        minimal_dev(_stage(os.path.realpath(rw[0])))
+        applied.append("minimal_dev")
+    if do_proc_harden:
+        harden_proc()
+        applied.append("proc_hardened")
     if readonly:
         cwd = os.getcwd()
         make_readonly(rw, ro)

@@ -247,7 +247,7 @@ def test_enforced_reports_every_protection_on_a_normal_run(tmp_path: Path):
     # memory_cap (the cgroup) depends on the host delegating one; the rest never does.
     assert {k: v for k, v in res.enforced.items() if k != "memory_cap"} == {
         "network_isolated": True, "readonly_fs": True, "no_capabilities": True,
-        "seccomp": True, "heap_limit": True}
+        "seccomp": True, "heap_limit": True, "minimal_dev": True, "proc_hardened": True}
     assert res.enforced["memory_cap"] is (sandbox_mod._cgroup_parent() is not None)
 
 
