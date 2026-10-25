@@ -22,6 +22,7 @@ from openplow import benchmark as bm
 
 ROOT = Path(__file__).resolve().parent.parent / "benchmarks" / "upstream"
 SPEC = ROOT / "benchmark.json"
+WITH_DECOYS = ROOT / "with-decoys.json"
 FIXTURE = ROOT / "fixture.json"
 
 
@@ -57,6 +58,19 @@ def test_dos_target_is_scored_as_reproduced_not_timed_out(tmp_path):
     finding = next(f for f in json.loads(dos.read_text()) if f["id"] == "ancestry-dos")
     assert finding["verdict"] == "confirmed"
     assert finding["validation"]["poc_demonstrated"] is True
+
+
+def test_decoys_are_clean_and_vuln_targets_still_found(tmp_path):
+    # The combined suite replays the same exploit findings against every target.
+    # The two vulnerable targets must confirm; the two decoys (same source, fix
+    # applied) must reject, so there are no false positives.
+    report = bm.run_benchmark(
+        bm.load_spec(WITH_DECOYS), finder_spec=f"fixture:{FIXTURE}",
+        validator_spec=f"fixture:{FIXTURE}", sandbox_kind="stub", out_dir=tmp_path / "wd")
+    t = report.totals
+    assert t["recall"] == 1.0 and t["confirmed_recall"] == 1.0
+    assert t["decoy_targets"] == 2
+    assert t["decoys_clean"] == 2 and t["false_positives"] == 0
 
 
 def test_targets_carry_no_project_identifiers():
