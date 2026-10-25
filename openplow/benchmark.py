@@ -14,6 +14,10 @@ Metrics per target and in aggregate:
   (Cloudflare's north-star; theirs fell from 40% to 11% as recon improved)
 * **unmatched confirmed** — confirmed findings matching no known vuln (either a
   false positive or a genuinely new bug; a benchmark cannot tell which)
+* **false positives** — confirmed findings on *decoy* targets: code built to
+  look like a known-vulnerable target but with no bug, so anything confirmed
+  there is a false positive by construction. A decoy is marked ``"decoy": true``
+  with no ``expected`` vulns, and is not counted in recall.
 
 A finding matches a known vuln when they share the file and — when the manifest
 gives one — the symbol or a line within the given range. The attack class is not
@@ -67,6 +71,7 @@ class TargetSpec:
     name: str
     path: str
     expected: list[ExpectedVuln] = field(default_factory=list)
+    decoy: bool = False
 
 
 @dataclass
@@ -83,9 +88,13 @@ def load_spec(path: str | Path) -> BenchmarkSpec:
         TargetSpec(
             name=t["name"], path=t["path"],
             expected=[ExpectedVuln(**e) for e in t.get("expected", [])],
+            decoy=bool(t.get("decoy", False)),
         )
         for t in raw.get("targets", [])
     ]
+    for t in targets:
+        if t.decoy and t.expected:
+            raise ValueError(f"decoy target {t.name!r} must not list expected vulns")
     return BenchmarkSpec(name=raw.get("name", p.stem), base_dir=p.parent, targets=targets)
 
 
@@ -124,6 +133,8 @@ class TargetScore:
     recall: float
     confirmed_recall: float
     rejection_rate: float
+    decoy: bool = False
+    false_positives: int = 0
 
 
 def _is_duplicate(f: dict[str, Any]) -> bool:
@@ -153,6 +164,10 @@ def score_target(spec: TargetSpec, findings: list[dict[str, Any]]) -> TargetScor
     expected_total = len(spec.expected)
     unmatched_confirmed = sum(1 for f in confirmed if id(f) not in matched_findings)
     candidates = len(findings)
+    # On a decoy every confirmed finding is a false positive, not a maybe.
+    false_positives = len(confirmed) if spec.decoy else 0
+    if spec.decoy:
+        unmatched_confirmed = 0
 
     def _ratio(n: int, d: int) -> float:
         return round(n / d, 3) if d else 0.0
@@ -169,6 +184,8 @@ def score_target(spec: TargetSpec, findings: list[dict[str, Any]]) -> TargetScor
         recall=_ratio(len(matched_ids), expected_total),
         confirmed_recall=_ratio(len(confirmed_ids), expected_total),
         rejection_rate=_ratio(len(rejected), candidates),
+        decoy=spec.decoy,
+        false_positives=false_positives,
     )
 
 
@@ -198,6 +215,9 @@ def _aggregate(name: str, finder: str, validator: str,
         "candidates_total": cand, "rejected": rej, "unmatched_confirmed": unmatched,
         "recall": _ratio(matched, exp), "confirmed_recall": _ratio(confirmed, exp),
         "rejection_rate": _ratio(rej, cand),
+        "decoy_targets": sum(1 for s in scores if s.decoy),
+        "decoys_clean": sum(1 for s in scores if s.decoy and not s.false_positives),
+        "false_positives": sum(s.false_positives for s in scores),
     }
     return BenchmarkReport(name=name, finder=finder, validator=validator,
                            targets=scores, totals=totals)
@@ -285,12 +305,16 @@ def _write_report(report: BenchmarkReport, out_dir: Path) -> None:
         "## Totals",
         "",
         f"- Known vulns: {t['expected_total']}",
-        f"- Recall: **{t['recall']:.0%}** ({t['matched']}/{t['expected_total']})",
-        (f"- Confirmed recall: **{t['confirmed_recall']:.0%}** "
-         f"({t['confirmed_matched']}/{t['expected_total']})"),
+        *([f"- Recall: **{t['recall']:.0%}** ({t['matched']}/{t['expected_total']})",
+           (f"- Confirmed recall: **{t['confirmed_recall']:.0%}** "
+            f"({t['confirmed_matched']}/{t['expected_total']})")]
+          if t["expected_total"] else ["- Recall: n/a (no known vulns; decoys only)"]),
         (f"- Validation rejection rate: {t['rejection_rate']:.0%} "
          f"({t['rejected']}/{t['candidates_total']})"),
         f"- Unmatched confirmed (possible FP or new bug): {t['unmatched_confirmed']}",
+        *([(f"- Decoys (no bug): clean {t['decoys_clean']}/{t['decoy_targets']}; "
+            f"false positives (confirmed on a decoy): **{t['false_positives']}**")]
+          if t.get("decoy_targets") else []),
         (f"- Estimated cost: ${t.get('estimated_cost_usd', 0.0):.4f}"
          + ("" if t.get("cost_fully_priced", True) else " (some models unpriced)")
          + (f" (cap ${t['max_cost_usd']:.2f})" if t.get("max_cost_usd") is not None else "")),
@@ -307,6 +331,10 @@ def _write_report(report: BenchmarkReport, out_dir: Path) -> None:
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for s in report.targets:
+        if s.decoy:
+            lines.append(f"| {s.name} | decoy | — | — | {s.rejection_rate:.0%} | "
+                         f"{s.false_positives} FP |")
+            continue
         lines.append(
             f"| {s.name} | {s.expected_total} | {s.recall:.0%} | "
             f"{s.confirmed_recall:.0%} | {s.rejection_rate:.0%} | {s.unmatched_confirmed} |")

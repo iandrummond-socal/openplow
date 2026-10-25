@@ -1,0 +1,25 @@
+{
+  "name": "openplow-decoys",
+  "targets": [
+    {
+      "name": "decoy-tar-extract",
+      "path": "targets/tar-extract",
+      "decoy": true
+    },
+    {
+      "name": "decoy-zip-extract",
+      "path": "targets/zip-extract",
+      "decoy": true
+    },
+    {
+      "name": "decoy-sqlite-login",
+      "path": "targets/sqlite-login",
+      "decoy": true
+    },
+    {
+      "name": "decoy-net-ping",
+      "path": "targets/net-ping",
+      "decoy": true
+    }
+  ]
+}
