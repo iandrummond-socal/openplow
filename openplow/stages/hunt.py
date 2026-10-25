@@ -7,6 +7,8 @@ untouched code, and a proposed patch — or it is not filed.
 
 The prompt is assembled from the matching class file in the vendored skill plus
 the recon context (architecture.md) and a listing of the target area's files.
+The class file goes in the system prompt so it is cached across every hunt of
+that class.
 A finder that supports tool use also gets read-only ``list_files`` /
 ``read_file`` / ``grep`` tools over the checkout, so it can read the code it is
 hunting in rather than guess from file names.
@@ -112,12 +114,18 @@ def _build_prompt(ctx: RunContext, area: str, attack_class: str,
     arch = arch_path.read_text(encoding="utf-8") if arch_path.exists() else ""
     files = _area_files(ctx.repo, area)
 
+    # The class methodology goes in the system prompt, not the user prompt: it is
+    # the same for every hunt of this class (across areas, targets and gapfill
+    # passes), so the cached system prefix covers it.
+    system = (_SYSTEM + _TOOLS_NOTE if tools else _SYSTEM) + (
+        f"\n\n# Attack-class methodology: {attack_class}\n"
+        f"{class_prompt[:_CLASS_PROMPT_CHARS]}")
     prompt = (
         f"# Target\nRepo: {ctx.repo_name}\nArea: {area}\nAttack class: {attack_class}\n\n"
         f"# Architecture context\n{arch[:_ARCH_CHARS]}\n\n"
         f"# Files in this area ({len(files)} shown)\n" + "\n".join(files) + "\n\n"
-        f"# Attack-class methodology\n{class_prompt[:_CLASS_PROMPT_CHARS]}\n\n"
-        "Hunt this area for the attack class above. Return a JSON array of findings."
+        "Hunt this area for the attack class given in the methodology. "
+        "Return a JSON array of findings."
     )
     if depth > 1:
         prompt += (
@@ -125,7 +133,7 @@ def _build_prompt(ctx: RunContext, area: str, attack_class: str,
             "nothing. Look harder and from a different angle — chained or multi-step "
             "paths, edge cases, and assumptions the obvious review would skip."
         )
-    return (_SYSTEM + _TOOLS_NOTE if tools else _SYSTEM), prompt
+    return system, prompt
 
 
 def _parse_findings(text: str) -> list[dict[str, Any]]:

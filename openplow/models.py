@@ -101,6 +101,14 @@ class AnthropicAdapter(ModelAdapter):
     Lazily imports ``anthropic`` so the base install stays dependency-free.
     Install with ``pip install 'openplow[anthropic]'``.
 
+    Prompt caching: the system prompt (which, with the tool definitions ahead
+    of it, is shared by every call of the same kind) carries a cache breakpoint,
+    and the tool loop also sets top-level automatic caching so each turn reads
+    the conversation so far from cache instead of paying for it again.
+
+    An optional :class:`~openplow.pricing.Budget` is checked before every API
+    call and charged after it, so a spending cap holds even mid tool loop.
+
     Server-side refusal fallback is on by default (``fallbacks="default"``): when
     a safety classifier declines a request, the API re-runs it on Anthropic's
     recommended model for that refusal category within the same call. Pass
@@ -111,11 +119,13 @@ class AnthropicAdapter(ModelAdapter):
     supports_tools = True
 
     def __init__(self, model: str, api_key: str | None = None, *, name: str | None = None,
-                 effort: str | None = "high", fallbacks: str | None = "default"):
+                 effort: str | None = "high", fallbacks: str | None = "default",
+                 budget: Any = None):
         self.model = model
         self.name = name or f"anthropic:{model}"
         self.effort = effort  # output_config effort; "high" is good for audit work
         self.fallbacks = fallbacks if fallbacks and "haiku" not in model else None
+        self.budget = budget
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._client: Any = None
 
@@ -133,10 +143,17 @@ class AnthropicAdapter(ModelAdapter):
         return self._client
 
     def _create(self, client: Any, kwargs: dict[str, Any]) -> Any:
+        if self.budget is not None:
+            self.budget.check(self.model, kwargs["max_tokens"])
         if self.fallbacks:
-            return client.beta.messages.create(betas=[_FALLBACK_BETA],
-                                               fallbacks=self.fallbacks, **kwargs)
-        return client.messages.create(**kwargs)
+            msg = client.beta.messages.create(betas=[_FALLBACK_BETA],
+                                              fallbacks=self.fallbacks, **kwargs)
+        else:
+            msg = client.messages.create(**kwargs)
+        if self.budget is not None:
+            usage = _extract_usage(msg)
+            self.budget.charge(usage.get("model") or self.model, usage)
+        return msg
 
     def complete(self, system: str, prompt: str, *, max_tokens: int = 4096) -> ModelResponse:
         # Note: temperature/top_p are intentionally not sent — current models
@@ -146,7 +163,7 @@ class AnthropicAdapter(ModelAdapter):
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": max_tokens,
-                "system": system,
+                "system": _cached_system(system),
                 "messages": [{"role": "user", "content": prompt}],
             }
             if self.effort:
@@ -189,9 +206,11 @@ class AnthropicAdapter(ModelAdapter):
                 kwargs: dict[str, Any] = {
                     "model": self.model,
                     "max_tokens": max_tokens,
-                    "system": system,
+                    "system": _cached_system(system),
                     "messages": messages,
                     "tools": specs,
+                    # Automatic caching of the growing conversation tail.
+                    "cache_control": {"type": "ephemeral"},
                 }
                 if final_call:
                     kwargs["tool_choice"] = {"type": "none"}
@@ -256,6 +275,12 @@ class AnthropicAdapter(ModelAdapter):
 
 
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+def _cached_system(system: str) -> list[dict[str, Any]]:
+    """System prompt as one text block with a cache breakpoint. Tools render
+    before system, so this caches the tool definitions too."""
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
 
 
 def served_model(resp: ModelResponse) -> str | None:
@@ -354,6 +379,9 @@ def _grep(text: str, label: str) -> str:
 
 
 def _classify_exception(exc: Exception) -> Outcome:
+    from .pricing import BudgetExceeded
+    if isinstance(exc, BudgetExceeded):
+        return Outcome.FATAL  # retrying cannot help; its message may contain "500"
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
     retryable = ("overloaded", "ratelimit", "rate_limit", "timeout", "apiconnection",
@@ -417,7 +445,7 @@ class MeteredAdapter(ModelAdapter):
 _BUILTIN = {"stub": lambda **kw: StubAdapter()}
 
 
-def build_adapter(spec: str, *, effort: str | None = None) -> ModelAdapter:
+def build_adapter(spec: str, *, effort: str | None = None, budget: Any = None) -> ModelAdapter:
     """Build an adapter from a short spec.
 
     ``stub``                 -> StubAdapter
@@ -427,8 +455,8 @@ def build_adapter(spec: str, *, effort: str | None = None) -> ModelAdapter:
     if spec in _BUILTIN:
         return _BUILTIN[spec]()
     if spec.startswith("anthropic:"):
-        kw = {"effort": effort} if effort else {}
-        return AnthropicAdapter(model=spec.split(":", 1)[1], **kw)
+        kw: dict[str, Any] = {"effort": effort} if effort else {}
+        return AnthropicAdapter(model=spec.split(":", 1)[1], budget=budget, **kw)
     if spec.startswith("fixture:"):
         return FixtureAdapter.from_path(spec.split(":", 1)[1])
     raise ValueError(f"unknown adapter spec: {spec!r}")

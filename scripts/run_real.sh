@@ -8,12 +8,18 @@
 # Defaults: finder claude-opus-5-5, validator claude-sonnet-5-5 (finder and
 # validator should differ so each checks the other). Set OPENPLOW_SANDBOX and
 # OPENPLOW_EFFORT to override the sandbox (default unshare) and effort (high).
+# Set OPENPLOW_MAX_COST (USD) to cap estimated spend; the run stops making model
+# calls once it is reached.
 set -euo pipefail
 
 FINDER_DEFAULT="claude-opus-5-5"
 VALIDATOR_DEFAULT="claude-sonnet-5-5"
 SANDBOX="${OPENPLOW_SANDBOX:-unshare}"
 EFFORT="${OPENPLOW_EFFORT:-high}"
+COST_ARGS=()
+if [[ -n "${OPENPLOW_MAX_COST:-}" ]]; then
+  COST_ARGS=(--max-cost "$OPENPLOW_MAX_COST")
+fi
 
 # ---- preflight ----------------------------------------------------------
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
@@ -37,18 +43,18 @@ if [[ "${1:-}" == "--benchmark" ]]; then
   SPEC="${2:?benchmark spec path required}"
   FINDER="${3:-$FINDER_DEFAULT}"
   VALIDATOR="${4:-$VALIDATOR_DEFAULT}"
-  echo "benchmark=$SPEC finder=$FINDER validator=$VALIDATOR sandbox=$SANDBOX effort=$EFFORT"
+  echo "benchmark=$SPEC finder=$FINDER validator=$VALIDATOR sandbox=$SANDBOX effort=$EFFORT max_cost=${OPENPLOW_MAX_COST:-none}"
   exec openplow benchmark "$SPEC" \
     --adapter "anthropic:$FINDER" \
     --validator-adapter "anthropic:$VALIDATOR" \
-    --sandbox "$SANDBOX" --effort "$EFFORT"
+    --sandbox "$SANDBOX" --effort "$EFFORT" ${COST_ARGS[@]+"${COST_ARGS[@]}"}
 else
   REPO="${1:?target repo path required}"
   FINDER="${2:-$FINDER_DEFAULT}"
   VALIDATOR="${3:-$VALIDATOR_DEFAULT}"
-  echo "repo=$REPO finder=$FINDER validator=$VALIDATOR sandbox=$SANDBOX effort=$EFFORT"
+  echo "repo=$REPO finder=$FINDER validator=$VALIDATOR sandbox=$SANDBOX effort=$EFFORT max_cost=${OPENPLOW_MAX_COST:-none}"
   exec openplow run "$REPO" \
     --adapter "anthropic:$FINDER" \
     --validator-adapter "anthropic:$VALIDATOR" \
-    --sandbox "$SANDBOX" --effort "$EFFORT"
+    --sandbox "$SANDBOX" --effort "$EFFORT" ${COST_ARGS[@]+"${COST_ARGS[@]}"}
 fi

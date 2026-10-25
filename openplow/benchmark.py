@@ -206,21 +206,32 @@ def _aggregate(name: str, finder: str, validator: str,
 # ---- running ------------------------------------------------------------
 
 def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str | None,
-                  sandbox_kind: str, out_dir: Path, effort: str | None = None) -> BenchmarkReport:
+                  sandbox_kind: str, out_dir: Path, effort: str | None = None,
+                  max_cost: float | None = None) -> BenchmarkReport:
+    """Run every target and score it. With ``max_cost``, one spending cap is
+    shared by all targets; once it is reached, the target in progress finishes
+    without further model calls and the remaining targets are skipped (and
+    listed in the report, since their recall is not measured)."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    budget = pricing.Budget(max_cost) if max_cost is not None else None
 
     scores: list[TargetScore] = []
+    skipped: list[str] = []
     total_cost = 0.0
     cost_priced = True
     for target in spec.targets:
+        if budget is not None and budget.exhausted:
+            skipped.append(target.name)
+            continue
         repo = (spec.base_dir / target.path).resolve()
         run_id = f"bench-{target.name}-{uuid.uuid4().hex[:8]}"
         target_out = out_dir / run_id
         target_out.mkdir(parents=True, exist_ok=True)
         store = Store(out_dir / "benchmark.sqlite")
-        finder = MeteredAdapter(build_adapter(finder_spec, effort=effort),
+        finder = MeteredAdapter(build_adapter(finder_spec, effort=effort, budget=budget),
                                 store, run_id, repo.name, "finder")
-        validator = MeteredAdapter(build_adapter(validator_spec or finder_spec, effort=effort),
+        validator = MeteredAdapter(build_adapter(validator_spec or finder_spec, effort=effort,
+                                                 budget=budget),
                                    store, run_id, repo.name, "validator")
         ctx = RunContext(run_id=run_id, repo=repo, out_dir=target_out, store=store,
                          finder=finder, validator=validator,
@@ -237,6 +248,9 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
     report = _aggregate(spec.name, finder_name, validator_name, scores)
     report.totals["estimated_cost_usd"] = round(total_cost, 4)
     report.totals["cost_fully_priced"] = cost_priced
+    report.totals["max_cost_usd"] = max_cost
+    report.totals["cap_reached"] = bool(budget and budget.exhausted)
+    report.totals["skipped_targets"] = skipped
     _write_report(report, out_dir)
     return report
 
@@ -278,7 +292,14 @@ def _write_report(report: BenchmarkReport, out_dir: Path) -> None:
          f"({t['rejected']}/{t['candidates_total']})"),
         f"- Unmatched confirmed (possible FP or new bug): {t['unmatched_confirmed']}",
         (f"- Estimated cost: ${t.get('estimated_cost_usd', 0.0):.4f}"
-         + ("" if t.get("cost_fully_priced", True) else " (some models unpriced)")),
+         + ("" if t.get("cost_fully_priced", True) else " (some models unpriced)")
+         + (f" (cap ${t['max_cost_usd']:.2f})" if t.get("max_cost_usd") is not None else "")),
+    ]
+    if t.get("cap_reached"):
+        lines.append("- **Spending cap reached:** the last target run is incomplete"
+                     + (f"; skipped (not scored): {', '.join(t['skipped_targets'])}"
+                        if t.get("skipped_targets") else ""))
+    lines += [
         "",
         "## Per target",
         "",
