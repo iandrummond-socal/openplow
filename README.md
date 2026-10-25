@@ -16,8 +16,16 @@ sandbox for running target code.
 > Every model call's raw output is saved for diagnosis. Refused requests fall back
 > to another model. Prompts are cached, and a spending cap stops a run before it
 > overspends. The benchmark measures recall on CVE reproductions and false
-> positives on bug-free decoys. The `unshare` sandbox is read-only outside
-> scratch, drops capabilities and filters syscalls; a cgroup memory cap applies where one is delegated. See
+> positives on bug-free decoys. The `unshare` sandbox (Linux only) is read-only
+> outside scratch, gives the payload a minimal `/dev` and a read-only `/proc/sys`
+> (and the other kernel controls), drops capabilities and filters syscalls; a
+> cgroup memory cap applies where one is delegated. By default it also refuses to
+> create unix sockets (`socket(AF_UNIX)`), so the payload cannot reach host
+> daemons; `socketpair` still works. That default breaks a PoC that runs its own
+> unix-socket server: pass `allow_unix_sockets=True` for one. With that opt-in on,
+> host sockets under `/run`, `/tmp` and `/var/run` are reachable, because hiding
+> those directories is not built yet. On macOS and Windows the `stub` backend
+> enforces none of this (only a cleaned env, a timeout and rlimits). See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/HANDOFF.md`](docs/HANDOFF.md) for the current state and next steps.
 
 ## Why a harness and not just the skill
@@ -209,8 +217,8 @@ pinned in the `dev` extra.
 | `openplow/db.py` | SQLite state store keyed by `(run_id, repo, stage)` |
 | `openplow/models.py` | Model adapters (stub, fixture, Anthropic with tool loop, caching, fallback), metering |
 | `openplow/repo_tools.py` | Read-only, root-confined `list_files` / `read_file` / `grep` for the models |
-| `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps, and for `unshare` a read-only filesystem, no capabilities and a seccomp denylist |
-| `openplow/_sandbox_init.py` | Runs inside the `unshare` namespaces: read-only remount, capability drop, seccomp filter, then `exec` |
+| `openplow/sandbox.py` | OS-enforced sandbox: cleaned env, net isolation, rlimit caps, and for `unshare` a read-only filesystem, a minimal `/dev`, hardened `/proc`, no capabilities and a seccomp denylist that also refuses unix sockets (opt-in: `allow_unix_sockets=True`) |
+| `openplow/_sandbox_init.py` | Runs inside the `unshare` namespaces: minimal `/dev`, `/proc` hardening, read-only remount, capability drop, seccomp filter, then `exec` |
 | `openplow/poc.py` | Runs a finding's PoC against a pristine copy; detects tampering; fail→pass patch gate |
 | `openplow/stages/` | `recon`, `hunt`, `validate`, `gapfill`, `dedup`, `report` |
 | `openplow/benchmark.py` | Runs the pipeline over known-vuln and decoy targets; scores recall, noise, false positives |

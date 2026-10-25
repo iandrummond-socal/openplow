@@ -51,7 +51,8 @@ def _run_bpf(program: bytes, *, arch: int, nr: int, arg0: int = 0) -> int:
 def test_seccomp_program_behavior(machine):
     program = init.build_seccomp_program(machine)
     assert len(program) % 8 == 0
-    audit_arch, names, clone_nr, clone3_nr = init._ARCHES[machine]
+    # [:4] so a socket number added as a fifth member does not break the unpack.
+    audit_arch, names, clone_nr, clone3_nr = init._ARCHES[machine][:4]
 
     def verdict(nr, arg0=0, arch=audit_arch):
         return _run_bpf(program, arch=arch, nr=nr, arg0=arg0)
@@ -66,6 +67,28 @@ def test_seccomp_program_behavior(machine):
     assert verdict(clone_nr, arg0=0x40000011) == eperm           # CLONE_NEWNET
     assert verdict(0) == ALLOW                                   # an ordinary syscall
     assert verdict(names["mount"], arch=0x12345678) == KILL      # wrong architecture
+    socket_nr, socketpair_nr = _SOCKET_NRS[machine]
+    assert verdict(socket_nr, arg0=_AF_UNIX) == eperm            # socket(AF_UNIX)
+    assert verdict(socket_nr, arg0=_AF_INET) == ALLOW            # socket(AF_INET)
+    assert verdict(socketpair_nr, arg0=_AF_UNIX) == ALLOW        # multiprocessing, asyncio
+
+
+# Kernel syscall numbers (socket, socketpair), written out here rather than read
+# from the launcher, so a wrong number in the launcher's table fails this test.
+_SOCKET_NRS = {"x86_64": (41, 53), "aarch64": (198, 199)}
+_AF_UNIX, _AF_INET = 1, 2
+
+
+@pytest.mark.parametrize("machine", ["x86_64", "aarch64"])
+def test_seccomp_can_allow_unix_sockets(machine):
+    program = init.build_seccomp_program(machine, deny_unix_sockets=False)
+    audit_arch = init._ARCHES[machine][0]
+    socket_nr, _ = _SOCKET_NRS[machine]
+    for family in (_AF_UNIX, _AF_INET):
+        assert _run_bpf(program, arch=audit_arch, nr=socket_nr, arg0=family) == ALLOW
+    # the rest of the denylist is unchanged
+    assert (_run_bpf(program, arch=audit_arch, nr=init._ARCHES[machine][1]["mount"])
+            == init.SECCOMP_RET_ERRNO | init.EPERM)
 
 
 def test_seccomp_x32_abi_is_killed():
@@ -247,7 +270,8 @@ def test_enforced_reports_every_protection_on_a_normal_run(tmp_path: Path):
     # memory_cap (the cgroup) depends on the host delegating one; the rest never does.
     assert {k: v for k, v in res.enforced.items() if k != "memory_cap"} == {
         "network_isolated": True, "readonly_fs": True, "no_capabilities": True,
-        "seccomp": True, "heap_limit": True}
+        "seccomp": True, "heap_limit": True, "minimal_dev": True, "proc_hardened": True,
+        "unix_sockets_blocked": True}
     assert res.enforced["memory_cap"] is (sandbox_mod._cgroup_parent() is not None)
 
 

@@ -26,6 +26,15 @@ Components 1–8, one repo, CLI only.
 - [x] Run PoCs against a pristine copy with source-integrity (tamper) detection (`poc.py`); reproduction is the confirmation gate
 - [x] Sandbox: read-only filesystem (writes only to scratch and the PoC working directory), all capabilities dropped, seccomp denylist, data-segment memory cap; fails closed if a step cannot be applied (`sandbox.py`, `_sandbox_init.py`)
 - [x] Sandbox: cgroup-v2 memory cap (`memory.max`, no swap) where a cgroup with the memory controller is delegated; elsewhere the run reports `memory_cap: false` and `Limits.memory_mb` still caps the heap. Not yet: a `systemd-run --user` path for plain desktop Linux (`sandbox.py`)
+- [x] Sandbox: minimal `/dev` (`null zero full random urandom tty`, private `pts` and `shm`; no `kmsg`, `mem` or loop devices) and read-only kernel controls in `/proc` (`sys`, `sysrq-trigger`, `bus`, `fs`, `irq`; `kcore`, `keys`, `timer_list` and similar masked), on by default, off with `minimal_dev=False` / `harden_proc=False`; reported as `minimal_dev` and `proc_hardened` in `enforced` (`sandbox.py`, `_sandbox_init.py`)
+- [x] Sandbox: seccomp refuses `socket(AF_UNIX)` with EPERM by default, so the payload cannot reach host daemons (ssh-agent, DBus, `docker.sock`); `socketpair` is always allowed. This breaks a PoC that runs its own unix-socket server; the opt-in is `allow_unix_sockets=True`. Reported as `unix_sockets_blocked` in `enforced` (`sandbox.py`, `_sandbox_init.py`)
+- [x] `scripts/test_linux.sh` can run the suite as a non-root user (`OPENPLOW_TEST_USER=<uid>`)
+- [ ] Sandbox: hide `/run`, `/tmp` and a real `/var/run` (keeping scratch). Not built: with `allow_unix_sockets=True`, host sockets there are reachable
+- [ ] Sandbox: automated isolation PoC tests (`tests/test_sandbox_isolation.py`). The `/dev`, `/proc` and unix-socket behaviour was checked by hand probes only; the BPF filter has unit tests
+- [ ] Sandbox: minimal read-only root, so the payload cannot read `$HOME` and the rest of the host filesystem
+- [ ] Sandbox: loopback networking (`lo` up) as a transport for PoCs that need a local server
+- [ ] Sandbox: a non-privileged Linux CI job, and runtime verification on x86_64 (the x86_64 filter has unit tests but has not been run on an x86_64 kernel)
+- The protections above are Linux-only. On macOS and Windows the `stub` backend enforces none of them: only a cleaned env, a timeout and rlimits.
 - [x] Fail→pass patch gate: reproduce → apply the finding's patch → must not reproduce; only a clean flip passes (`poc.run_patch_gate`, wired into validate; `fix.gate_passed` on confirmed findings, counted in the report)
 
 ## M2 — Coverage
