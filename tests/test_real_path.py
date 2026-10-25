@@ -85,6 +85,23 @@ def test_validate_finding_accepts_complete():
     assert fmod.validate_finding(good) == []
 
 
+def test_validate_finding_accepts_the_validators_poc_fields():
+    # The validate stage records the PoC run beside the verdict; the schema must
+    # name every key it writes.
+    finding = {
+        "id": "x", "verdict": "confirmed", "title": "t",
+        "attack_class": "web-protocol-and-auth",
+        "threat_model": {"attacker": "remote", "boundary": "auth"},
+        "location": {"file": "src/app.py"},
+        "validation": {
+            "checked_by": "m", "served_by": "m", "disproof_attempted": True, "notes": "n",
+            "poc_attempted": True, "poc_demonstrated": True, "poc_reason": "",
+            "poc_enforced": {"seccomp": True, "memory_cap": False},
+        },
+    }
+    assert fmod.validate_finding(finding) == []
+
+
 # ---- skill loader -------------------------------------------------------
 
 def test_skill_is_vendored():

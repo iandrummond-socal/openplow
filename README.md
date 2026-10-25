@@ -17,7 +17,7 @@ sandbox for running target code.
 > to another model. Prompts are cached, and a spending cap stops a run before it
 > overspends. The benchmark measures recall on CVE reproductions and false
 > positives on bug-free decoys. The `unshare` sandbox is read-only outside
-> scratch, drops capabilities and filters syscalls; a cgroup memory cap remains. See
+> scratch, drops capabilities and filters syscalls; a cgroup memory cap applies where one is delegated. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/HANDOFF.md`](docs/HANDOFF.md) for the current state and next steps.
 
 ## Why a harness and not just the skill

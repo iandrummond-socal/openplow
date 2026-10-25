@@ -25,7 +25,7 @@ Components 1–8, one repo, CLI only.
 - [x] Harden the sandbox: cleaned env, net isolation (`unshare --net`), rlimit caps — cpu, file size, procs, optional address space (`sandbox.py`)
 - [x] Run PoCs against a pristine copy with source-integrity (tamper) detection (`poc.py`); reproduction is the confirmation gate
 - [x] Sandbox: read-only filesystem (writes only to scratch and the PoC working directory), all capabilities dropped, seccomp denylist, data-segment memory cap; fails closed if a step cannot be applied (`sandbox.py`, `_sandbox_init.py`)
-- [ ] Sandbox: cgroup-v2 memory cap (needs a delegated cgroup subtree; `Limits.memory_mb` covers the heap until then)
+- [x] Sandbox: cgroup-v2 memory cap (`memory.max`, no swap) where a cgroup with the memory controller is delegated; elsewhere the run reports `memory_cap: false` and `Limits.memory_mb` still caps the heap. Not yet: a `systemd-run --user` path for plain desktop Linux (`sandbox.py`)
 - [x] Fail→pass patch gate: reproduce → apply the finding's patch → must not reproduce; only a clean flip passes (`poc.run_patch_gate`, wired into validate; `fix.gate_passed` on confirmed findings, counted in the report)
 
 ## M2 — Coverage

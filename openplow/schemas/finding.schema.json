@@ -73,7 +73,15 @@
         "checked_by": { "type": "string" },
         "served_by": { "type": ["string", "null"], "description": "Model id that wrote the validator's verdict (a fallback model if the request was refused)." },
         "disproof_attempted": { "type": "boolean" },
-        "notes": { "type": "string" }
+        "notes": { "type": "string" },
+        "poc_attempted": { "type": "boolean", "description": "Whether the finding's PoC was run in the sandbox." },
+        "poc_demonstrated": { "type": "boolean", "description": "Whether the PoC reproduced the bug against the untouched copy." },
+        "poc_reason": { "type": "string", "description": "Why a PoC did not count (timeout, tampering, did not reproduce); empty when it did." },
+        "poc_enforced": {
+          "type": "object",
+          "additionalProperties": { "type": "boolean" },
+          "description": "Which sandbox protections were active for the PoC run (e.g. seccomp, readonly_fs, memory_cap). Empty means the backend claimed none."
+        }
       }
     },
     "provenance": {

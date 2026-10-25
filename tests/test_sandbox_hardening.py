@@ -11,12 +11,14 @@ from __future__ import annotations
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from openplow import _sandbox_init as init
 from openplow import poc as poc_mod
+from openplow import sandbox as sandbox_mod
 from openplow.sandbox import Limits, StubSandbox, UnshareSandbox
 
 # ---- seccomp program, checked with a tiny classic-BPF interpreter ---------
@@ -84,6 +86,8 @@ def test_mountinfo_unescape_and_within():
 
 # ---- memory cap -----------------------------------------------------------
 
+@pytest.mark.skipif(sys.platform == "darwin",
+                    reason="macOS does not enforce RLIMIT_DATA; the cap is Linux-only")
 def test_memory_cap_stops_a_large_allocation(tmp_path: Path):
     sb = StubSandbox(tmp_path / "sb", timeout=20, limits=Limits(cpu_seconds=20, memory_mb=256))
     res = sb.run([sys.executable, "-c", "x = bytearray(900 * 1024 * 1024); print('alloc')"])
@@ -130,15 +134,45 @@ def test_unshare_writes_only_inside_scratch(tmp_path: Path):
 
 
 @needs_unshare
-def test_unshare_cwd_outside_scratch_is_writable_only_for_that_dir(tmp_path: Path):
-    work = tmp_path / "work"
-    work.mkdir()
+@pytest.mark.parametrize("inside_scratch", [True, False])
+def test_unshare_cwd_is_read_only(tmp_path: Path, inside_scratch: bool):
+    # The PoC's working directory is the target under test: it can read it but
+    # not change it, whether it sits inside the scratch dir (the real pipeline)
+    # or beside it. Scratch itself, outside the target, stays writable.
+    scratch = tmp_path / "scratch"
+    target = (scratch if inside_scratch else tmp_path) / "target"
+    (target / "src").mkdir(parents=True)
+    (target / "src" / "app.py").write_text("x = 1\n")
+    sb = UnshareSandbox(scratch, timeout=20)
+
+    read = _py(sb, "print(open('src/app.py').read().strip())", cwd=target)
+    assert read.returncode == 0 and read.stdout.strip() == "x = 1", read.stderr
+
+    for code in ("open('src/app.py', 'w').write('tampered')",   # overwrite existing
+                 "open('new.py', 'w').write('x')",              # create a file
+                 "import os; os.mkdir('d')",                    # create a dir
+                 "import os; os.remove('src/app.py')"):         # delete
+        res = _py(sb, code, cwd=target)
+        assert res.returncode != 0 and "Read-only file system" in res.stderr, code
+    assert sorted(p.name for p in target.iterdir()) == ["src"]
+    assert (target / "src" / "app.py").read_text() == "x = 1\n"
+
+    ok = _py(sb, "import os; open(os.environ['TMPDIR'] + '/f', 'w').write('1')", cwd=target)
+    assert ok.returncode == 0, ok.stderr
+    assert (scratch / "f").read_text() == "1"
+
+
+@needs_unshare
+def test_unshare_cannot_remount_target_writable(tmp_path: Path):
+    target = tmp_path / "scratch" / "target"
+    target.mkdir(parents=True)
     sb = UnshareSandbox(tmp_path / "scratch", timeout=20)
-    res = _py(sb, "open('made', 'w').write('1')", cwd=work)
-    assert res.returncode == 0, res.stderr
-    assert (work / "made").exists()
-    sibling = _py(sb, f"open({str(tmp_path / 'sibling')!r}, 'w')", cwd=work)
-    assert sibling.returncode != 0
+    code = ("import ctypes\n"
+            "l = ctypes.CDLL(None, use_errno=True)\n"
+            "print(l.mount(None, str(__import__('os').getcwd()).encode(), None, 32 | 4096, None))\n"
+            "open('x', 'w')\n")
+    res = _py(sb, code, cwd=target)
+    assert res.returncode != 0 and not (target / "x").exists()
 
 
 @needs_unshare
@@ -183,7 +217,7 @@ def test_unshare_fails_closed_when_setup_fails(tmp_path: Path):
     argv = sb._wrap([sys.executable, "-c", f"open({str(marker)!r}, 'w')"])
     argv[argv.index("--rw") + 1] = str(tmp_path / "does-not-exist")
     res = subprocess.run(argv, check=False, capture_output=True, text=True)
-    assert res.returncode == 126 and "openplow sandbox" in res.stderr
+    assert res.returncode == 125 and "openplow sandbox" in res.stderr
     assert not marker.exists()
 
 
@@ -202,3 +236,218 @@ def test_poc_runs_in_hardened_sandbox_and_flags_tampering(tmp_path: Path):
                       "content": "open('src/app.py', 'w').write('tampered')\n"}}
     run = poc_mod.run_poc(sb, repo, tamper, tmp_path / "scratch" / "f2")
     assert not run.demonstrated
+    assert "Read-only file system" in run.output  # blocked outright, not just detected
+    assert run.integrity_ok
+
+
+@needs_unshare
+def test_enforced_reports_every_protection_on_a_normal_run(tmp_path: Path):
+    res = _py(UnshareSandbox(tmp_path / "scratch", timeout=20), "print('hi')")
+    assert res.returncode == 0, res.stderr
+    # memory_cap (the cgroup) depends on the host delegating one; the rest never does.
+    assert {k: v for k, v in res.enforced.items() if k != "memory_cap"} == {
+        "network_isolated": True, "readonly_fs": True, "no_capabilities": True,
+        "seccomp": True, "heap_limit": True}
+    assert res.enforced["memory_cap"] is (sandbox_mod._cgroup_parent() is not None)
+
+
+@needs_unshare
+def test_enforced_is_honest_when_a_protection_is_off(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20, seccomp=False)
+    res = _py(sb, "print('hi')")
+    assert res.returncode == 0, res.stderr
+    assert res.enforced["seccomp"] is False and res.enforced["readonly_fs"] is True
+
+
+@needs_unshare
+def test_enforced_is_all_false_when_the_launcher_fails(tmp_path: Path):
+    class Broken(UnshareSandbox):
+        def _wrap(self, argv, cwd=None, status_fd=None):
+            out = super()._wrap(argv, cwd, status_fd)
+            out[out.index("--rw") + 1] = str(tmp_path / "does-not-exist")
+            return out
+
+    res = _py(Broken(tmp_path / "scratch", timeout=20), "print('ran')")
+    assert res.returncode == 125 and "openplow sandbox" in res.stderr
+    assert "ran" not in res.stdout
+    assert res.enforced and not any(res.enforced.values())
+
+
+@needs_unshare
+def test_payload_cannot_forge_the_status_report(tmp_path: Path):
+    # The report fd is closed on exec: the payload finds nothing to write to.
+    code = ("import os\n"
+            "for fd in range(3, 64):\n"
+            "    try: os.write(fd, b'readonly_fs,no_capabilities,seccomp')\n"
+            "    except OSError: pass\n"
+            "raise SystemExit(125)\n")
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20)
+    res = _py(sb, code)
+    assert res.returncode == 125
+    assert not any(res.enforced.values())  # cautious, never more generous
+
+
+def test_stub_sandbox_claims_nothing(tmp_path: Path):
+    res = StubSandbox(tmp_path / "sb", timeout=20).run([sys.executable, "-c", "pass"])
+    assert res.enforced == {}
+
+
+@needs_unshare
+def test_timed_out_payload_leaves_no_running_children(tmp_path: Path):
+    ticks = tmp_path / "scratch" / "ticks"
+    code = ("import os, subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import os, time\\n"
+            "while True:\\n"
+            "    open(os.environ[\"TMPDIR\"] + \"/ticks\", \"a\").write(\"x\")\\n"
+            "    time.sleep(0.1)'])\n"
+            "time.sleep(60)\n")
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=2)
+    res = _py(sb, code)
+    assert res.timed_out
+    size = ticks.stat().st_size
+    time.sleep(1)
+    assert ticks.stat().st_size == size  # the child stopped with its parent
+
+
+def test_poc_run_on_the_stub_claims_no_protections(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    finding = {"poc": {"kind": "script", "content": "print('PWNED')\n", "observed": "PWNED"}}
+    run = poc_mod.run_poc(StubSandbox(tmp_path / "sb", timeout=20), repo, finding,
+                          tmp_path / "sb" / "f")
+    assert run.demonstrated and run.enforced == {}
+
+
+@needs_unshare
+def test_poc_run_reports_the_protections_that_ran(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    finding = {"poc": {"kind": "script", "content": "print('PWNED')\n", "observed": "PWNED"}}
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20)
+    run = poc_mod.run_poc(sb, repo, finding, tmp_path / "scratch" / "f")
+    assert run.demonstrated, run.output
+    assert run.enforced["readonly_fs"] and run.enforced["seccomp"]
+    assert run.enforced["no_capabilities"] and run.enforced["network_isolated"]
+
+
+# ---- cgroup-v2 memory cap --------------------------------------------------
+# These need a delegated cgroup with the memory controller; scripts/test_linux.sh
+# sets one up. Elsewhere they skip, and the honest-fallback tests still run.
+
+needs_cgroup = pytest.mark.skipif(
+    not (_unshare_works() and sandbox_mod._cgroup_parent() is not None),
+    reason="no delegated cgroup with the memory controller")
+
+# A shared mapping is charged to the cgroup but not counted by RLIMIT_DATA, so
+# only the cgroup cap can stop it.
+_BOMB = ("import mmap\n"
+         "m = mmap.mmap(-1, 900 * 1024 * 1024)\n"
+         "for i in range(0, len(m), 4096):\n"
+         "    m[i] = 1\n"
+         "print('survived')\n")
+
+
+def _leaves() -> list[Path]:
+    parent = sandbox_mod._cgroup_parent()
+    return sorted(parent.glob("openplow-*")) if parent else []
+
+
+@needs_cgroup
+def test_cgroup_cap_kills_a_memory_bomb(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=128))
+    start = time.monotonic()
+    res = _py(sb, _BOMB)
+    assert "survived" not in res.stdout and res.returncode != 0
+    assert res.oom_killed and res.enforced["memory_cap"] is True
+    assert time.monotonic() - start < 20
+    assert _leaves() == []
+
+
+@needs_cgroup
+def test_cgroup_cap_leaves_a_normal_payload_alone(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=512))
+    res = _py(sb, "x = bytearray(50 * 1024 * 1024); print('fine')")
+    assert res.returncode == 0 and "fine" in res.stdout, res.stderr
+    assert not res.oom_killed and res.enforced["memory_cap"] is True
+    assert _leaves() == []
+
+
+@needs_cgroup
+def test_cgroup_leaf_is_removed_after_a_timeout(tmp_path: Path):
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=2, limits=Limits(memory_mb=512))
+    res = _py(sb, "import time; time.sleep(60)")
+    assert res.timed_out and _leaves() == []
+
+
+@needs_cgroup
+def test_cgroup_cold_start_twin(tmp_path: Path):
+    # First run and a repeat run both get a fresh leaf and clean up.
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=512))
+    for _ in range(2):
+        res = _py(sb, "print('ok')")
+        assert res.returncode == 0 and res.enforced["memory_cap"] is True
+        assert _leaves() == []
+
+
+@needs_unshare
+def test_memory_cap_is_reported_false_when_no_cgroup(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setattr(sandbox_mod, "_cgroup_parent", lambda *a, **k: None)
+    monkeypatch.setattr(sandbox_mod, "_warned_no_cgroup", False)
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20, limits=Limits(memory_mb=512))
+    for _ in range(2):
+        res = _py(sb, "print('ran')")
+        assert res.returncode == 0 and "ran" in res.stdout
+        assert res.enforced["memory_cap"] is False and res.enforced["heap_limit"] is True
+        assert res.oom_killed is False
+    assert capsys.readouterr().err.count("no memory cap from a cgroup") == 1  # warned once
+
+
+@needs_unshare
+def test_no_cgroup_is_made_when_the_cap_is_off(tmp_path: Path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("a cgroup was requested with memory_mb=0")
+    monkeypatch.setattr(sandbox_mod, "_make_cgroup_leaf", boom)
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=20, limits=Limits(memory_mb=0))
+    res = _py(sb, "print('ok')")
+    assert res.returncode == 0
+    assert res.enforced["memory_cap"] is False and res.enforced["heap_limit"] is False
+
+
+def test_cgroup_parent_picks_a_delegated_writable_cgroup(tmp_path: Path):
+    root = tmp_path / "cg"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "cgroup.controllers").write_text("memory\n")
+    proc = tmp_path / "proc_cgroup"
+    proc.write_text("0::/a/b\n")
+    # Neither /a/b nor /a delegates memory: no cap.
+    (root / "a" / "b" / "cgroup.subtree_control").write_text("")
+    (root / "a" / "cgroup.subtree_control").write_text("cpu\n")
+    assert sandbox_mod._cgroup_parent(root, proc) is None
+    # The parent delegates memory: a sibling leaf under it is fine.
+    (root / "a" / "cgroup.subtree_control").write_text("cpu memory\n")
+    assert sandbox_mod._cgroup_parent(root, proc) == root / "a"
+    # Its own delegation wins.
+    (root / "a" / "b" / "cgroup.subtree_control").write_text("memory\n")
+    assert sandbox_mod._cgroup_parent(root, proc) == root / "a" / "b"
+    # Not cgroup v2 (no cgroup.controllers): no cap.
+    (root / "cgroup.controllers").unlink()
+    assert sandbox_mod._cgroup_parent(root, proc) is None
+
+
+@needs_cgroup
+def test_payload_cannot_lift_its_own_memory_cap(tmp_path: Path):
+    # The leaf's files map to the payload's root inside the user namespace, so the
+    # cgroup filesystem must be read-only there or the payload can write memory.max.
+    code = ("import os\n"
+            "rel = open('/proc/self/cgroup').read().strip().split('::', 1)[1]\n"
+            "try:\n"
+            "    open('/sys/fs/cgroup' + rel + '/memory.max', 'w').write('max')\n"
+            "    print('LIFTED')\n"
+            "except OSError as e:\n"
+            "    print('blocked', e.errno)\n")
+    sb = UnshareSandbox(tmp_path / "scratch", timeout=30, limits=Limits(memory_mb=128))
+    res = _py(sb, code)
+    assert "LIFTED" not in res.stdout and "blocked" in res.stdout, res.stdout + res.stderr
+    # ...and the cap still bites after the attempt.
+    res = _py(sb, _BOMB)
+    assert res.oom_killed and "survived" not in res.stdout

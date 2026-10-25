@@ -174,7 +174,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         "checked_by": ctx.validator.name, "served_by": served_by,
         "disproof_attempted": True, "notes": notes,
         "poc_attempted": run.attempted, "poc_demonstrated": run.demonstrated,
-        "poc_reason": run.reason,
+        "poc_reason": run.reason, "poc_enforced": run.enforced,
     }
 
     # Fail->pass patch gate on confirmed findings that ship a patch.
@@ -200,6 +200,7 @@ def _reject(ctx: RunContext, finding: dict[str, Any], finding_id: str,
     finding["severity"] = None
     finding["validation"] = {"checked_by": "poc-execution", "disproof_attempted": True,
                              "notes": reason, "poc_attempted": run.attempted,
-                             "poc_demonstrated": run.demonstrated}
+                             "poc_demonstrated": run.demonstrated,
+                             "poc_enforced": run.enforced}
     ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "validate", finding)
     return {"finding_id": finding_id, "verdict": "rejected", "reasons": [reason]}

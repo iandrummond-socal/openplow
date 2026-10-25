@@ -3,7 +3,9 @@
 ``UnshareSandbox`` runs this file as ``python3 -I _sandbox_init.py ... -- cmd``.
 It tightens the process in four steps, then ``exec``s the command:
 
-1. Make the filesystem read-only, except the paths passed with ``--rw``.
+1. Make the filesystem read-only, except the paths passed with ``--rw``; then
+   make the paths passed with ``--ro`` read-only again, even inside a ``--rw``
+   tree (the target under test lives in the scratch dir).
 2. Drop every capability from the bounding set. The payload is "root" inside a
    user namespace; without this it could still remount or reconfigure things.
 3. Set ``no_new_privs`` and load a seccomp denylist (mount, ptrace, bpf, module
@@ -15,8 +17,13 @@ namespaces are set up, and the filter would block ``unshare`` and ``mount``
 themselves. The file uses only the standard library and is run with ``-I`` so a
 planted module in the target directory cannot be imported.
 
-Any failure to apply a step exits 126 instead of running the payload with a
-weaker sandbox than the caller asked for.
+Any failure to apply a step exits 125 instead of running the payload with a
+weaker sandbox than the caller asked for (125, because a shell uses 126 and 127
+for "cannot execute" and "not found").
+
+``--status-fd N`` names a pipe the parent reads to learn which steps were
+applied. The launcher writes the list just before ``exec`` and closes the fd on
+exec, so the payload never holds it and cannot forge a report.
 """
 
 from __future__ import annotations
@@ -44,8 +51,11 @@ _OPT_FLAGS = {
     "noatime": MS_NOATIME, "nodiratime": MS_NODIRATIME, "relatime": MS_RELATIME,
 }
 
-# Mounts that are not part of the file tree a payload could write source into.
-_SKIP_PREFIXES = ("/proc", "/sys", "/dev")
+# Mounts left as they are. /sys is NOT here: its cgroup filesystem is writable, and
+# the payload's cgroup leaf maps to root inside the user namespace, so the payload
+# could otherwise raise its own memory.max. The cgroup join happens in the parent,
+# before unshare, so the payload never needs to write there.
+_SKIP_PREFIXES = ("/proc", "/dev")
 
 # ---- seccomp -------------------------------------------------------------
 PR_SET_NO_NEW_PRIVS = 38
@@ -174,7 +184,7 @@ def _libc() -> ctypes.CDLL:
 
 def _fail(msg: str) -> None:
     sys.stderr.write(f"openplow sandbox: {msg}\n")
-    sys.exit(126)
+    sys.exit(125)
 
 
 def _mount(libc, source, target, fstype, flags) -> None:
@@ -216,8 +226,12 @@ def _within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def make_readonly(rw_paths: list[str]) -> None:
-    """Remount every mount read-only except the ``rw_paths`` subtrees."""
+def make_readonly(rw_paths: list[str], ro_paths: list[str] = ()) -> None:
+    """Remount every mount read-only except the ``rw_paths`` subtrees.
+
+    A ``ro_paths`` entry is then bound onto itself and remounted read-only, so
+    it stays read-only even when it sits inside a writable subtree.
+    """
     libc = _libc()
     rw = [os.path.realpath(p) for p in rw_paths]
     for path in rw:  # make each a mountpoint of its own, so it can stay writable
@@ -228,6 +242,11 @@ def make_readonly(rw_paths: list[str]) -> None:
         if any(_within(mountpoint, p) for p in rw):
             continue
         _mount(libc, None, mountpoint, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
+    for path in (os.path.realpath(p) for p in ro_paths):
+        _mount(libc, path, path, None, MS_BIND | MS_REC)
+        # Remounting an unprivileged bind must keep the flags it inherited.
+        flags = max((f for m, f in _mounts() if m == path), default=0)
+        _mount(libc, None, path, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
 
 
 def drop_capabilities() -> None:
@@ -261,11 +280,19 @@ def apply_seccomp() -> None:
 
 def main(argv: list[str]) -> None:
     rw: list[str] = []
+    ro: list[str] = []
+    status_fd: int | None = None
     readonly = seccomp = True
     i = 0
     while i < len(argv) and argv[i] != "--":
         if argv[i] == "--rw":
             rw.append(argv[i + 1])
+            i += 2
+        elif argv[i] == "--ro":
+            ro.append(argv[i + 1])
+            i += 2
+        elif argv[i] == "--status-fd":
+            status_fd = int(argv[i + 1])
             i += 2
         elif argv[i] == "--no-readonly":
             readonly = False
@@ -279,15 +306,22 @@ def main(argv: list[str]) -> None:
     if not command:
         _fail("no command given")
 
+    applied: list[str] = []
     if readonly:
         cwd = os.getcwd()
-        make_readonly(rw)
+        make_readonly(rw, ro)
+        applied.append("readonly_fs")
         # The working directory still points at the pre-bind mount; re-enter it by
         # path so relative writes land on the writable bind.
         os.chdir(cwd)
     drop_capabilities()
+    applied.append("no_capabilities")
     if seccomp:
         apply_seccomp()
+        applied.append("seccomp")
+    if status_fd is not None:
+        os.set_inheritable(status_fd, False)  # closed by exec: the payload never sees it
+        os.write(status_fd, ",".join(applied).encode())
     try:
         os.execvp(command[0], command)
     except OSError as exc:
