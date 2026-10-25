@@ -130,15 +130,45 @@ def test_unshare_writes_only_inside_scratch(tmp_path: Path):
 
 
 @needs_unshare
-def test_unshare_cwd_outside_scratch_is_writable_only_for_that_dir(tmp_path: Path):
-    work = tmp_path / "work"
-    work.mkdir()
+@pytest.mark.parametrize("inside_scratch", [True, False])
+def test_unshare_cwd_is_read_only(tmp_path: Path, inside_scratch: bool):
+    # The PoC's working directory is the target under test: it can read it but
+    # not change it, whether it sits inside the scratch dir (the real pipeline)
+    # or beside it. Scratch itself, outside the target, stays writable.
+    scratch = tmp_path / "scratch"
+    target = (scratch if inside_scratch else tmp_path) / "target"
+    (target / "src").mkdir(parents=True)
+    (target / "src" / "app.py").write_text("x = 1\n")
+    sb = UnshareSandbox(scratch, timeout=20)
+
+    read = _py(sb, "print(open('src/app.py').read().strip())", cwd=target)
+    assert read.returncode == 0 and read.stdout.strip() == "x = 1", read.stderr
+
+    for code in ("open('src/app.py', 'w').write('tampered')",   # overwrite existing
+                 "open('new.py', 'w').write('x')",              # create a file
+                 "import os; os.mkdir('d')",                    # create a dir
+                 "import os; os.remove('src/app.py')"):         # delete
+        res = _py(sb, code, cwd=target)
+        assert res.returncode != 0 and "Read-only file system" in res.stderr, code
+    assert sorted(p.name for p in target.iterdir()) == ["src"]
+    assert (target / "src" / "app.py").read_text() == "x = 1\n"
+
+    ok = _py(sb, "import os; open(os.environ['TMPDIR'] + '/f', 'w').write('1')", cwd=target)
+    assert ok.returncode == 0, ok.stderr
+    assert (scratch / "f").read_text() == "1"
+
+
+@needs_unshare
+def test_unshare_cannot_remount_target_writable(tmp_path: Path):
+    target = tmp_path / "scratch" / "target"
+    target.mkdir(parents=True)
     sb = UnshareSandbox(tmp_path / "scratch", timeout=20)
-    res = _py(sb, "open('made', 'w').write('1')", cwd=work)
-    assert res.returncode == 0, res.stderr
-    assert (work / "made").exists()
-    sibling = _py(sb, f"open({str(tmp_path / 'sibling')!r}, 'w')", cwd=work)
-    assert sibling.returncode != 0
+    code = ("import ctypes\n"
+            "l = ctypes.CDLL(None, use_errno=True)\n"
+            "print(l.mount(None, str(__import__('os').getcwd()).encode(), None, 32 | 4096, None))\n"
+            "open('x', 'w')\n")
+    res = _py(sb, code, cwd=target)
+    assert res.returncode != 0 and not (target / "x").exists()
 
 
 @needs_unshare
@@ -202,3 +232,5 @@ def test_poc_runs_in_hardened_sandbox_and_flags_tampering(tmp_path: Path):
                       "content": "open('src/app.py', 'w').write('tampered')\n"}}
     run = poc_mod.run_poc(sb, repo, tamper, tmp_path / "scratch" / "f2")
     assert not run.demonstrated
+    assert "Read-only file system" in run.output  # blocked outright, not just detected
+    assert run.integrity_ok

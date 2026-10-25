@@ -166,8 +166,9 @@ class UnshareSandbox(Sandbox):
 
     * a private user/net/pid/mount namespace; the net namespace is empty, so
       there is no external network;
-    * the whole filesystem is read-only, except the scratch directory and the
-      working directory the caller passes (``readonly_fs``);
+    * the whole filesystem is read-only, except the scratch directory, and the
+      working directory the caller passes is read-only even inside scratch
+      (``readonly_fs``);
     * every capability is dropped, and a seccomp denylist blocks mount, ptrace,
       bpf, module loading, namespace creation and io_uring (``seccomp``);
     * the base rlimit caps, including a 2 GiB data-segment cap by default.
@@ -200,8 +201,10 @@ class UnshareSandbox(Sandbox):
         init = [sys.executable, "-I", str(Path(__file__).with_name("_sandbox_init.py"))]
         if self.readonly_fs:
             init += ["--rw", str(self.scratch.resolve())]
-            if cwd is not None and not _inside(Path(cwd).resolve(), self.scratch.resolve()):
-                init += ["--rw", str(Path(cwd).resolve())]
+            if cwd is not None:
+                # The working directory is the target under test: readable, never
+                # writable, wherever it sits (usually inside scratch).
+                init += ["--ro", str(Path(cwd).resolve())]
         else:
             init += ["--no-readonly"]
         if not self.seccomp:
@@ -216,10 +219,6 @@ class UnshareSandbox(Sandbox):
         if not self.available():
             raise RuntimeError("unshare not found; install util-linux or use StubSandbox")
         return self._exec(self._wrap(argv, cwd), cwd)
-
-
-def _inside(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
 
 
 def build_sandbox(kind: str, scratch: str | Path, **kwargs) -> Sandbox:

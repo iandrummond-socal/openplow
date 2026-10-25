@@ -3,7 +3,9 @@
 ``UnshareSandbox`` runs this file as ``python3 -I _sandbox_init.py ... -- cmd``.
 It tightens the process in four steps, then ``exec``s the command:
 
-1. Make the filesystem read-only, except the paths passed with ``--rw``.
+1. Make the filesystem read-only, except the paths passed with ``--rw``; then
+   make the paths passed with ``--ro`` read-only again, even inside a ``--rw``
+   tree (the target under test lives in the scratch dir).
 2. Drop every capability from the bounding set. The payload is "root" inside a
    user namespace; without this it could still remount or reconfigure things.
 3. Set ``no_new_privs`` and load a seccomp denylist (mount, ptrace, bpf, module
@@ -216,8 +218,12 @@ def _within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def make_readonly(rw_paths: list[str]) -> None:
-    """Remount every mount read-only except the ``rw_paths`` subtrees."""
+def make_readonly(rw_paths: list[str], ro_paths: list[str] = ()) -> None:
+    """Remount every mount read-only except the ``rw_paths`` subtrees.
+
+    A ``ro_paths`` entry is then bound onto itself and remounted read-only, so
+    it stays read-only even when it sits inside a writable subtree.
+    """
     libc = _libc()
     rw = [os.path.realpath(p) for p in rw_paths]
     for path in rw:  # make each a mountpoint of its own, so it can stay writable
@@ -228,6 +234,11 @@ def make_readonly(rw_paths: list[str]) -> None:
         if any(_within(mountpoint, p) for p in rw):
             continue
         _mount(libc, None, mountpoint, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
+    for path in (os.path.realpath(p) for p in ro_paths):
+        _mount(libc, path, path, None, MS_BIND | MS_REC)
+        # Remounting an unprivileged bind must keep the flags it inherited.
+        flags = max((f for m, f in _mounts() if m == path), default=0)
+        _mount(libc, None, path, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
 
 
 def drop_capabilities() -> None:
@@ -261,11 +272,15 @@ def apply_seccomp() -> None:
 
 def main(argv: list[str]) -> None:
     rw: list[str] = []
+    ro: list[str] = []
     readonly = seccomp = True
     i = 0
     while i < len(argv) and argv[i] != "--":
         if argv[i] == "--rw":
             rw.append(argv[i + 1])
+            i += 2
+        elif argv[i] == "--ro":
+            ro.append(argv[i + 1])
             i += 2
         elif argv[i] == "--no-readonly":
             readonly = False
@@ -281,7 +296,7 @@ def main(argv: list[str]) -> None:
 
     if readonly:
         cwd = os.getcwd()
-        make_readonly(rw)
+        make_readonly(rw, ro)
         # The working directory still points at the pre-bind mount; re-enter it by
         # path so relative writes land on the writable bind.
         os.chdir(cwd)
