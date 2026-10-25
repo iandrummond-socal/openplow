@@ -23,11 +23,14 @@ Two backends:
 
 Under Docker the unshare backend needs
 ``--security-opt seccomp=unconfined --security-opt apparmor=unconfined`` or it
-fails silently. The unshare backend also makes the filesystem read-only (except
-scratch), drops all capabilities and loads a seccomp denylist; see
-:mod:`openplow._sandbox_init`. ``Limits.memory_mb`` caps the data segment
-everywhere and, where a cgroup-v2 subtree with the memory controller is
-delegated to this process, also sets a hard cgroup cap (see :func:`_cgroup_parent`).
+fails silently. The unshare backend also replaces the payload's view of the
+filesystem with a minimal read-only root (the system runtimes under ``/usr``, a
+synthesised ``/etc``, scratch and the target; ``$HOME`` and the rest of the host
+are not there), makes the filesystem read-only (except scratch), drops all
+capabilities and loads a seccomp denylist; see :mod:`openplow._sandbox_init`.
+``Limits.memory_mb`` caps the data segment everywhere and, where a cgroup-v2
+subtree with the memory controller is delegated to this process, also sets a
+hard cgroup cap (see :func:`_cgroup_parent`).
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -270,6 +274,18 @@ class UnshareSandbox(Sandbox):
 
     * a private user/net/pid/mount namespace; the net namespace is empty, so
       there is no external network;
+    * the payload sees a minimal root, not the host's: ``/usr`` and the
+      ``/bin /sbin /lib*`` entries (read-only), a synthesised ``/etc`` (``root``
+      and ``nobody`` only, never the host's ``passwd``, ``shadow`` or hostname),
+      ``/dev``, ``/proc``, an empty ``/tmp``, scratch and the target. ``$HOME``,
+      ``/root``, ``/home``, ``/var``, ``/run``, ``/sys`` and the rest of the host
+      are absent, so a PoC cannot read keys or learn about the machine
+      (``minimal_root``). It needs ``minimal_dev``: with the host's ``/dev`` a
+      payload running as real root could read the block devices directly. This
+      default BREAKS a PoC whose runtime lives outside ``/usr`` (an ``nvm`` node, a
+      ``pyenv`` python, ``/opt/...``); name such a path in ``expose`` (or
+      ``OPENPLOW_SANDBOX_EXPOSE``, see :func:`build_sandbox`) and it is bound in
+      read-only at its own path;
     * the whole filesystem is read-only, except the scratch directory, and the
       working directory the caller passes is read-only even inside scratch
       (``readonly_fs``);
@@ -292,7 +308,8 @@ class UnshareSandbox(Sandbox):
 
     The filesystem, ``/dev``, ``/proc``, capability and seccomp steps run in
     :mod:`openplow._sandbox_init`, after the namespaces exist; each can be turned
-    off with its keyword (``minimal_dev=False``, ``harden_proc=False`` ...). If a
+    off with its keyword (``minimal_root=False``, ``minimal_dev=False``,
+    ``harden_proc=False`` ...). If a
     step that is on cannot be applied, the command does not run (exit 125).
     ``HOME`` and ``TMPDIR`` point at the scratch directory, because ``/tmp`` is
     read-only inside the sandbox.
@@ -303,13 +320,21 @@ class UnshareSandbox(Sandbox):
 
     def __init__(self, scratch: str | Path, *, readonly_fs: bool = True,
                  seccomp: bool = True, minimal_dev: bool = True,
-                 harden_proc: bool = True, allow_unix_sockets: bool = False, **kwargs):
+                 harden_proc: bool = True, allow_unix_sockets: bool = False,
+                 minimal_root: bool = True, expose: Sequence[str | Path] = (), **kwargs):
+        if minimal_root and not minimal_dev:
+            # With the host's /dev a payload running as real root can read the block
+            # devices directly, whatever the minimal root hides.
+            raise ValueError("minimal_root needs minimal_dev")
         super().__init__(scratch, **kwargs)
         self.readonly_fs = readonly_fs
         self.seccomp = seccomp
         self.minimal_dev = minimal_dev
         self.harden_proc = harden_proc
         self.allow_unix_sockets = allow_unix_sockets
+        self.minimal_root = minimal_root
+        # Absolute paths, so the launcher's "relative path" refusal is a backstop only.
+        self.expose = [Path(p).resolve() for p in expose]
 
     @staticmethod
     def available() -> bool:
@@ -323,11 +348,13 @@ class UnshareSandbox(Sandbox):
     def _wrap(self, argv: list[str], cwd: str | Path | None = None,
               status_fd: int | None = None) -> list[str]:
         init = [sys.executable, "-I", str(Path(__file__).with_name("_sandbox_init.py"))]
-        if self.readonly_fs or self.minimal_dev:
+        scratch = self.scratch.resolve()
+        staged = self.readonly_fs or self.minimal_dev or self.minimal_root
+        if staged:
             # Scratch is always the FIRST --rw: the launcher makes its staging
             # directories under the first --rw path, so a hide step needs it even
             # when the filesystem is left writable (without it the launcher exits 125).
-            init += ["--rw", str(self.scratch.resolve())]
+            init += ["--rw", str(scratch)]
         if self.readonly_fs:
             if cwd is not None:
                 # The working directory is the target under test: readable, never
@@ -335,6 +362,14 @@ class UnshareSandbox(Sandbox):
                 init += ["--ro", str(Path(cwd).resolve())]
         else:
             init += ["--no-readonly"]
+            if cwd is not None and staged and Path(cwd).resolve() != scratch:
+                # The working directory must exist in the minimal root, and the
+                # caller asked for a writable filesystem, so it is grafted writable.
+                init += ["--rw", str(Path(cwd).resolve())]
+        if not self.minimal_root:
+            init += ["--no-minimal-root"]
+        for path in self.expose:
+            init += ["--expose", str(path)]
         if not self.seccomp:
             init += ["--no-seccomp"]
         if not self.minimal_dev:
@@ -387,6 +422,7 @@ class UnshareSandbox(Sandbox):
         reached = bool(applied)
         return {
             "network_isolated": reached,
+            "minimal_root": "minimal_root" in applied,
             "readonly_fs": "readonly_fs" in applied,
             "no_capabilities": "no_capabilities" in applied,
             "seccomp": "seccomp" in applied,
@@ -404,5 +440,11 @@ def build_sandbox(kind: str, scratch: str | Path, **kwargs) -> Sandbox:
     if kind == "stub":
         return StubSandbox(scratch, **kwargs)
     if kind == "unshare":
+        if "expose" not in kwargs:
+            # Lets a member expose a runtime outside /usr from the CLI and
+            # scripts/run_real.sh without a flag on every entry point. There is
+            # deliberately no environment switch that turns the minimal root off.
+            raw = os.environ.get("OPENPLOW_SANDBOX_EXPOSE", "")
+            kwargs["expose"] = [p for p in raw.split(os.pathsep) if p]
         return UnshareSandbox(scratch, **kwargs)
     raise ValueError(f"unknown sandbox kind: {kind!r}")
