@@ -27,7 +27,7 @@ from typing import Any
 
 from .. import poc as poc_mod
 from ..context import RunContext
-from ..models import ModelResponse, Outcome
+from ..models import ModelResponse, Outcome, served_model
 from ..repo_tools import RepoTools
 
 # Tool rounds the validator may spend reading code before it must answer.
@@ -80,11 +80,12 @@ def _pass1_deterministic(ctx: RunContext, finding: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, str]:
+def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, str, str | None]:
     """Ask a fresh validator model to disprove the finding.
 
-    Returns ``(verdict, notes)`` where verdict is one of ``confirmed``,
-    ``rejected``, or ``needs_validation``. The validator must end with a line
+    Returns ``(verdict, notes, served_by)`` where verdict is one of ``confirmed``,
+    ``rejected``, or ``needs_validation`` and ``served_by`` is the model that
+    wrote the verdict, when known. The validator must end with a line
     ``VERDICT: <value>``. The stub cannot judge, so a finding that clears Pass 1
     stays ``needs_validation`` — it is never auto-confirmed without a real
     adversarial check."""
@@ -113,10 +114,10 @@ def _pass2_adversarial(ctx: RunContext, finding: dict[str, Any]) -> tuple[str, s
     if resp.outcome is Outcome.RETRYABLE:
         raise RuntimeError("validator transient failure")
     if resp.text.strip() == "STUB_OK":
-        return "needs_validation", "stub validator: no adversarial judgment available"
+        return "needs_validation", "stub validator: no adversarial judgment available", None
 
     verdict = _parse_verdict(resp.text)
-    return verdict, resp.text[:800]
+    return verdict, resp.text[:800], served_model(resp)
 
 
 def _parse_verdict(text: str) -> str:
@@ -159,7 +160,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         return _reject(ctx, finding, finding_id, f"poc-execution: {run.reason}", run)
 
     # Adversarial model pass (can disprove even an executed PoC).
-    verdict, notes = _pass2_adversarial(ctx, finding)
+    verdict, notes, served_by = _pass2_adversarial(ctx, finding)
 
     if run.attempted and run.demonstrated:
         # Reproduced against untouched code. Confirm unless the model disproved it.
@@ -170,7 +171,8 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         # Only a confirmed finding keeps a severity; clear any the finder set.
         finding["severity"] = None
     finding["validation"] = {
-        "checked_by": ctx.validator.name, "disproof_attempted": True, "notes": notes,
+        "checked_by": ctx.validator.name, "served_by": served_by,
+        "disproof_attempted": True, "notes": notes,
         "poc_attempted": run.attempted, "poc_demonstrated": run.demonstrated,
         "poc_reason": run.reason,
     }

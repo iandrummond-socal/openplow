@@ -360,3 +360,36 @@ def test_hunt_logs_refusal_instead_of_unparseable(tmp_path, repo):
     record = json.loads((ctx.out_dir / "transcripts" / "hunt"
                          / "src__cloud-and-deployment__d1.json").read_text())
     assert record["stop_details"] == {"category": "cyber"}
+
+
+class _FallbackFinder(_ToolFinder):
+    def complete_with_tools(self, system, prompt, tools, *, max_tokens=4096, max_rounds=30):
+        return ModelResponse(outcome=Outcome.OK, text=self._text, raw={
+            "stop_reason": "end_turn", "served_by": ["claude-opus-5-5", "claude-opus-4-8"],
+            "transcript": [{"served_by": "claude-opus-5-5"},
+                           {"served_by": "claude-opus-4-8", "text": self._text}]})
+
+
+def test_provenance_records_fallback_model(tmp_path, repo):
+    ctx = _ctx(tmp_path, repo, _FallbackFinder("```json\n" + json.dumps([_finding("script")])
+                                               + "\n```"))
+    hunt.run_task(ctx, {"area": "src", "attack_class": "cloud-and-deployment"})
+    prov = ctx.store.findings("run-t")[0]["provenance"]
+    assert prov["finder_model"] == "tool-finder"
+    assert prov["served_by"] == "claude-opus-4-8"
+
+
+def test_validation_records_serving_model(tmp_path, repo):
+    from openplow.stages import validate
+
+    class _Validator(_FallbackFinder):
+        name = "tool-validator"
+
+    ctx = _ctx(tmp_path, repo, _ToolFinder("[]"))
+    ctx.validator = _Validator("Checked.\nVERDICT: confirmed")
+    f = _finding("input")
+    f["verdict"] = "needs_validation"
+    ctx.store.upsert_finding("run-t", repo.name, "hunt", f)
+    validate.run_task(ctx, {"finding_id": "cmd-1"})
+    v = ctx.store.findings("run-t")[0]["validation"]
+    assert v["checked_by"] == "tool-validator" and v["served_by"] == "claude-opus-4-8"

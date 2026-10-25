@@ -36,7 +36,7 @@ from typing import Any
 from .. import findings as findings_mod
 from .. import skill_loader
 from ..context import RunContext
-from ..models import Outcome
+from ..models import Outcome, served_model
 from ..repo_tools import RepoTools
 
 # How much of the class file and architecture to inject, to keep context small.
@@ -207,6 +207,8 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         finding["provenance"] = {
             "run_id": ctx.run_id, "repo": ctx.repo_name, "stage": "hunt",
             "finder_model": ctx.finder.name, "task_id": f"hunt:{area}:{attack_class}",
+            # Differs from finder_model when a refusal fell back to another model.
+            "served_by": served_model(resp),
         }
         problems = findings_mod.validate_finding(finding)
         if problems:

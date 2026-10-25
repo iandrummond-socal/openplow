@@ -71,6 +71,7 @@
       "description": "Filled by the adversarial validator; never by the finder.",
       "properties": {
         "checked_by": { "type": "string" },
+        "served_by": { "type": ["string", "null"], "description": "Model id that wrote the validator's verdict (a fallback model if the request was refused)." },
         "disproof_attempted": { "type": "boolean" },
         "notes": { "type": "string" }
       }
@@ -84,6 +85,10 @@
         "repo": { "type": "string" },
         "stage": { "type": "string" },
         "finder_model": { "type": ["string", "null"] },
+        "served_by": {
+          "type": ["string", "null"],
+          "description": "Model id that wrote the hunter's final answer; differs from finder_model when a refused request fell back to another model."
+        },
         "task_id": { "type": ["string", "null"] }
       }
     }

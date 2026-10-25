@@ -258,6 +258,17 @@ class AnthropicAdapter(ModelAdapter):
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
+def served_model(resp: ModelResponse) -> str | None:
+    """The model that wrote a response's final answer, when the adapter reports
+    it — the fallback model if a refusal was re-run, else the requested one."""
+    raw = resp.raw or {}
+    turns = raw.get("transcript") or []
+    if turns and isinstance(turns[-1], dict) and turns[-1].get("served_by"):
+        return turns[-1]["served_by"]
+    served = raw.get("served_by")
+    return served if isinstance(served, str) else None
+
+
 def _refusal_info(msg: Any, requested: str) -> dict[str, Any]:
     """Which model served a response, any fallback hops, and refusal details."""
     hops = [{"from": getattr(getattr(b, "from_", None), "model", None),
