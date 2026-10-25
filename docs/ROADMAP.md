@@ -24,7 +24,8 @@ Components 1–8, one repo, CLI only.
 - [x] Validator confirms/rejects on an explicit `VERDICT:` line; severity only on confirmed
 - [x] Harden the sandbox: cleaned env, net isolation (`unshare --net`), rlimit caps — cpu, file size, procs, optional address space (`sandbox.py`)
 - [x] Run PoCs against a pristine copy with source-integrity (tamper) detection (`poc.py`); reproduction is the confirmation gate
-- [ ] Sandbox: seccomp profile, read-only bind of the target, cgroup-v2 memory cap
+- [x] Sandbox: read-only filesystem (writes only to scratch and the PoC working directory), all capabilities dropped, seccomp denylist, data-segment memory cap; fails closed if a step cannot be applied (`sandbox.py`, `_sandbox_init.py`)
+- [ ] Sandbox: cgroup-v2 memory cap (needs a delegated cgroup subtree; `Limits.memory_mb` covers the heap until then)
 - [x] Fail→pass patch gate: reproduce → apply the finding's patch → must not reproduce; only a clean flip passes (`poc.run_patch_gate`, wired into validate; `fix.gate_passed` on confirmed findings, counted in the report)
 
 ## M2 — Coverage

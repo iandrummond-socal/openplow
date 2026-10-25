@@ -23,8 +23,10 @@ Two backends:
 
 Under Docker the unshare backend needs
 ``--security-opt seccomp=unconfined --security-opt apparmor=unconfined`` or it
-fails silently. A seccomp profile, a read-only bind of the target, and a
-cgroup-v2 memory cap are the next hardening steps (see ``docs/ROADMAP.md``).
+fails silently. The unshare backend also makes the filesystem read-only (except
+scratch), drops all capabilities and loads a seccomp denylist; see
+:mod:`openplow._sandbox_init`. A cgroup-v2 memory cap is the remaining step (see
+``docs/ROADMAP.md``); until then ``Limits.memory_mb`` caps the data segment.
 """
 
 from __future__ import annotations
@@ -59,6 +61,11 @@ class Limits:
     # Address-space cap. 0 disables it: RLIMIT_AS set too low breaks many
     # interpreters, so memory is better capped with a cgroup. Opt in explicitly.
     address_space_mb: int = 0
+    # Data-segment cap (RLIMIT_DATA): limits heap and private anonymous memory.
+    # Unlike RLIMIT_AS it ignores reserved-but-unused address space, so
+    # interpreters such as Node still start. 0 disables it. This is the memory
+    # cap until a cgroup-v2 cap is added (cgroups need a delegated subtree).
+    memory_mb: int = 0
 
 
 def _nproc_capped(platform: str | None = None) -> bool:
@@ -82,6 +89,8 @@ def _make_preexec(limits: Limits):
         if _nproc_capped():
             _set(resource.RLIMIT_NPROC, limits.max_procs)
         _set(resource.RLIMIT_CORE, 0)  # no core dumps
+        if limits.memory_mb > 0:
+            _set(resource.RLIMIT_DATA, limits.memory_mb * 1024 * 1024)
         if limits.address_space_mb > 0:
             _set(resource.RLIMIT_AS, limits.address_space_mb * 1024 * 1024)
 
@@ -100,13 +109,17 @@ class Sandbox:
     """Base class. Subclasses decide how strongly the boundary is enforced."""
 
     backend = "base"
+    # Memory cap used when the caller passes no Limits. Off for the stub, which
+    # runs trusted code; the unshare backend sets its own.
+    default_memory_mb = 0
 
     def __init__(self, scratch: str | Path, *, timeout: int = 60,
                  limits: Limits | None = None):
         self.scratch = Path(scratch)
         self.scratch.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
-        self.limits = limits or Limits(cpu_seconds=timeout)
+        self.limits = limits or Limits(cpu_seconds=timeout,
+                                       memory_mb=self.default_memory_mb)
 
     def run(self, argv: list[str], *, cwd: str | Path | None = None) -> SandboxResult:
         raise NotImplementedError
@@ -120,7 +133,7 @@ class Sandbox:
                 argv,
                 check=False,
                 cwd=str(cwd or self.scratch),
-                env=self._clean_env(),
+                env=self._env(),
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -129,6 +142,9 @@ class Sandbox:
             return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
         except subprocess.TimeoutExpired as exc:
             return SandboxResult(124, exc.stdout or "", exc.stderr or "", timed_out=True)
+
+    def _env(self) -> dict[str, str]:
+        return self._clean_env()
 
     @staticmethod
     def _clean_env() -> dict[str, str]:
@@ -146,27 +162,64 @@ class StubSandbox(Sandbox):
 
 
 class UnshareSandbox(Sandbox):
-    """Linux sandbox built on ``unshare``: a private user/net/pid/mount
-    namespace (the net namespace is empty, so there is no external network),
-    on top of the base rlimit caps."""
+    """Linux sandbox built on ``unshare``.
+
+    * a private user/net/pid/mount namespace; the net namespace is empty, so
+      there is no external network;
+    * the whole filesystem is read-only, except the scratch directory and the
+      working directory the caller passes (``readonly_fs``);
+    * every capability is dropped, and a seccomp denylist blocks mount, ptrace,
+      bpf, module loading, namespace creation and io_uring (``seccomp``);
+    * the base rlimit caps, including a 2 GiB data-segment cap by default.
+
+    The last three steps run in :mod:`openplow._sandbox_init`, after the
+    namespaces exist. If a step cannot be applied, the command does not run.
+    ``HOME`` and ``TMPDIR`` point at the scratch directory, because ``/tmp`` is
+    read-only inside the sandbox.
+    """
 
     backend = "unshare"
+    default_memory_mb = 2048
+
+    def __init__(self, scratch: str | Path, *, readonly_fs: bool = True,
+                 seccomp: bool = True, **kwargs):
+        super().__init__(scratch, **kwargs)
+        self.readonly_fs = readonly_fs
+        self.seccomp = seccomp
 
     @staticmethod
     def available() -> bool:
         return shutil.which("unshare") is not None
 
-    def _wrap(self, argv: list[str]) -> list[str]:
+    def _env(self) -> dict[str, str]:
+        env = self._clean_env()
+        env["HOME"] = env["TMPDIR"] = str(self.scratch.resolve())
+        return env
+
+    def _wrap(self, argv: list[str], cwd: str | Path | None = None) -> list[str]:
+        init = [sys.executable, "-I", str(Path(__file__).with_name("_sandbox_init.py"))]
+        if self.readonly_fs:
+            init += ["--rw", str(self.scratch.resolve())]
+            if cwd is not None and not _inside(Path(cwd).resolve(), self.scratch.resolve()):
+                init += ["--rw", str(Path(cwd).resolve())]
+        else:
+            init += ["--no-readonly"]
+        if not self.seccomp:
+            init += ["--no-seccomp"]
         return [
             "unshare", "--user", "--map-root-user", "--net", "--pid", "--fork",
             "--mount-proc", "--",
-            *argv,
+            *init, "--", *argv,
         ]
 
     def run(self, argv: list[str], *, cwd: str | Path | None = None) -> SandboxResult:
         if not self.available():
             raise RuntimeError("unshare not found; install util-linux or use StubSandbox")
-        return self._exec(self._wrap(argv), cwd)
+        return self._exec(self._wrap(argv, cwd), cwd)
+
+
+def _inside(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
 
 
 def build_sandbox(kind: str, scratch: str | Path, **kwargs) -> Sandbox:
