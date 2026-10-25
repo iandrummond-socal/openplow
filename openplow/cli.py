@@ -40,12 +40,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     store = _store()
+    from .pricing import Budget
+    budget = Budget(args.max_cost) if args.max_cost is not None else None
     # The validator must be a DIFFERENT model from the finder in real runs; for
     # the stub they are the same no-op adapter. Both are metered for cost.
-    finder = MeteredAdapter(build_adapter(args.adapter, effort=args.effort),
+    finder = MeteredAdapter(build_adapter(args.adapter, effort=args.effort, budget=budget),
                             store, run_id, repo.name, "finder")
     validator = MeteredAdapter(build_adapter(args.validator_adapter or args.adapter,
-                                             effort=args.effort),
+                                             effort=args.effort, budget=budget),
                                store, run_id, repo.name, "validator")
     sandbox = build_sandbox(args.sandbox, out_dir / "scratch")
 
@@ -62,6 +64,9 @@ def cmd_run(args: argparse.Namespace) -> int:
               f"needs_validation={summary.final.get('needs_validation')} "
               f"rejected={summary.final.get('rejected')}")
     _print_cost(store, run_id)
+    if budget is not None and budget.exhausted:
+        print(f"spending cap ${budget.limit:.2f} reached; the run stopped making model "
+              "calls and its results are incomplete")
     print(f"artifacts: {out_dir}")
     store.close()
     return 1 if summary.failed else 0
@@ -94,13 +99,18 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
           f"finder={args.adapter}  validator={args.validator_adapter or args.adapter}")
     report = run_benchmark(spec, finder_spec=args.adapter,
                            validator_spec=args.validator_adapter,
-                           sandbox_kind=args.sandbox, out_dir=out_dir, effort=args.effort)
+                           sandbox_kind=args.sandbox, out_dir=out_dir, effort=args.effort,
+                           max_cost=args.max_cost)
     t = report.totals
     print(f"recall={t['recall']:.0%} confirmed_recall={t['confirmed_recall']:.0%} "
           f"rejection_rate={t['rejection_rate']:.0%} "
           f"unmatched_confirmed={t['unmatched_confirmed']}")
     cost_note = "" if t.get("cost_fully_priced", True) else " (some models unpriced)"
     print(f"estimated cost: ${t.get('estimated_cost_usd', 0.0):.4f}{cost_note}")
+    if t.get("cap_reached"):
+        skipped = ", ".join(t.get("skipped_targets") or []) or "none"
+        print(f"spending cap ${t['max_cost_usd']:.2f} reached; results are incomplete "
+              f"(skipped targets: {skipped})")
     print(f"report: {out_dir / 'benchmark-report.md'}")
     return 0
 
@@ -140,6 +150,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--effort", default="high",
                      choices=["low", "medium", "high", "xhigh", "max"],
                      help="model effort for Anthropic adapters (default high)")
+    run.add_argument("--max-cost", type=float, default=None, metavar="USD",
+                     help="stop making model calls once estimated spend reaches this")
     run.add_argument("--resume", default=None, metavar="RUN_ID",
                      help="resume an interrupted run")
     run.set_defaults(func=cmd_run)
@@ -153,6 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["low", "medium", "high", "xhigh", "max"],
                     help="model effort for Anthropic adapters (default high)")
     bm.add_argument("--out", default="openplow-benchmarks", help="output directory")
+    bm.add_argument("--max-cost", type=float, default=None, metavar="USD",
+                    help="spending cap shared by all targets; later targets are skipped")
     bm.set_defaults(func=cmd_benchmark)
 
     st = sub.add_parser("status", help="show a run's state")

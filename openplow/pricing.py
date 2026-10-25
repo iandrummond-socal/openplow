@@ -63,3 +63,43 @@ def estimate_cost(model: str, usage: Usage) -> float | None:
         + usage.cache_creation_tokens * inp * _CACHE_CREATION_MULT
     ) / 1_000_000
     return round(dollars, 4)
+
+
+class BudgetExceeded(RuntimeError):
+    """Raised before an API call that the spending cap does not leave room for."""
+
+
+class Budget:
+    """A spending cap shared by every model call in a run or benchmark.
+
+    Each call is charged as it completes, at the rates of the model that served
+    it. Before a call, :meth:`check` refuses it unless the cap leaves room for
+    the call's worst-case output (``max_tokens`` at the model's output rate), so
+    output can never push spending over the cap. A call's input is not known in
+    advance; a large prompt can still overshoot by that one call's input cost.
+    """
+
+    def __init__(self, limit_usd: float):
+        self.limit = float(limit_usd)
+        self.spent = 0.0
+        self.refused = 0  # calls refused for lack of room under the cap
+
+    @property
+    def exhausted(self) -> bool:
+        """True once the cap is reached or has had to refuse a call."""
+        return self.refused > 0 or self.spent >= self.limit
+
+    def check(self, model: str, max_tokens: int) -> None:
+        rate = PRICES.get(model)
+        reserve = max_tokens * rate[1] / 1_000_000 if rate else 0.0
+        if self.spent + reserve > self.limit:
+            self.refused += 1
+            raise BudgetExceeded(
+                f"spending cap ${self.limit:.2f} reached: ${self.spent:.4f} spent, "
+                f"next call could add up to ${reserve:.4f}")
+
+    def charge(self, model: str, usage: dict) -> None:
+        cost = estimate_cost(model, Usage(
+            int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0)),
+            int(usage.get("cache_read_tokens", 0)), int(usage.get("cache_creation_tokens", 0))))
+        self.spent += cost or 0.0

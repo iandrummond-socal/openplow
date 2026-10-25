@@ -44,7 +44,8 @@ Components 9–13 plus an evaluation suite.
 - [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
 - [ ] More gapfill rounds driven by a coverage metric rather than a fixed cap
 - [ ] Add upstream CVE-fix targets (check out the pre-fix commit) alongside the reproductions
-- [ ] Prompt caching of the shared class-file/recon prefix to cut real-run cost
+- [x] Prompt caching: class file moved into the cached system prefix, plus automatic caching of the tool-loop conversation (`models.AnthropicAdapter`)
+- [x] Spending cap: `--max-cost` / `OPENPLOW_MAX_COST`, one budget shared by finder, validator and all benchmark targets; checked before every API call (`pricing.Budget`)
 
 ## M3 — Fleet
 Components 14–17.
