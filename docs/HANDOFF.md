@@ -26,6 +26,11 @@ One visible behaviour change: the queue now claims `validate` tasks before `hunt
 Before, recon's hunts all ran before the first validation.
 On this Mac the suite is 247 passed, 75 skipped, and lint is clean.
 
+**Sandbox tests in CI (PR #21).**
+Until this PR every real-sandbox test skipped on GitHub: Ubuntu 24.04's AppArmor blocks unprivileged user namespaces, so the `unshare` probe failed and the run stayed green.
+CI now lifts that block, prints skip reasons (`-rs`) and sets `OPENPLOW_REQUIRE_SANDBOX=1`, which stops the run if the sandbox can't start.
+They run as the non-root `runner` user on x86_64; the cgroup memory-cap tests and the root-only twin still skip there, with their reasons printed.
+
 ## Results so far, and their limits
 
 Five real runs were made, with finder `claude-opus-5-5` and validator
@@ -75,7 +80,7 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 
 | Needs | Task |
 | --- | --- |
-| no credits | Sandbox: `systemd-run --user` memory cap for desktop Linux, a non-privileged Linux CI job, loopback networking, runtime verification on x86_64 (roadmap M1) |
+| no credits | Sandbox: `systemd-run --user` memory cap for desktop Linux, loopback networking, runtime verification on x86_64 (roadmap M1) |
 | ~$2 credit | Decoys-only real run → first false-positive rate |
 | ~$5–6 credit | `benchmarks/cve-and-decoys.json` real run → honest recall and false positives in one report |
 | more than the credit left | First real `feedback-eval` run on the default split (`benchmarks/feedback/README.md`): training is about the `cve-and-decoys` run (~$5–6 above) plus two held-out runs, which is more than the ~$2.40 left. A Haiku-finder smoke run is the cheap first look. Never without Big Dawg's OK and a `--max-cost` cap below the credit left |
