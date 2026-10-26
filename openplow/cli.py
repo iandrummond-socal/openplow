@@ -1,6 +1,12 @@
 """OpenPlow command-line interface.
 
     openplow run <repo> [--adapter stub] [--validator-adapter ...] [--resume ID]
+                 [--lessons FILE] [--no-feedback]
+    openplow benchmark <spec> [--adapter ...] [--lessons FILE] [--no-feedback]
+                 [--record-training-signals] [--export-lessons FILE]
+    openplow rescore <run-dir> --spec <spec>
+    openplow feedback-eval <holdout-spec> --train <spec> [--compare imported|in-run]
+                 [--adapter ...] [--max-cost USD] [--repeats N]
     openplow status <run-id>
     openplow findings <run-id> [--verdict confirmed]
 """
@@ -35,6 +41,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"error: target repo not found: {repo}", file=sys.stderr)
         return 2
 
+    lessons = None
+    if args.lessons:
+        from .feedback import load_lessons
+        try:
+            lessons = load_lessons(args.lessons)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     run_id = args.resume or f"run-{uuid.uuid4().hex[:12]}"
     out_dir = DEFAULT_RUNS_DIR / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -52,7 +67,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     sandbox = build_sandbox(args.sandbox, out_dir / "scratch")
 
     ctx = RunContext(run_id=run_id, repo=repo, out_dir=out_dir, store=store,
-                     finder=finder, validator=validator, sandbox=sandbox)
+                     finder=finder, validator=validator, sandbox=sandbox,
+                     feedback=not args.no_feedback)
+    if lessons is not None:
+        from .feedback import import_lessons
+        # Counts are set, not added, so --resume with the same file is idempotent.
+        import_lessons(store, run_id, lessons)
 
     print(f"OpenPlow {__version__}  run={run_id}  repo={repo.name}  "
           f"finder={finder.name}  validator={validator.name}")
@@ -94,13 +114,23 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     from .benchmark import load_spec, run_benchmark
 
     spec = load_spec(args.spec)
+    lessons = None
+    if args.lessons:
+        from .feedback import load_lessons
+        try:
+            lessons = load_lessons(args.lessons)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     out_dir = Path(args.out).resolve()
     print(f"OpenPlow benchmark '{spec.name}'  targets={len(spec.targets)}  "
           f"finder={args.adapter}  validator={args.validator_adapter or args.adapter}")
     report = run_benchmark(spec, finder_spec=args.adapter,
                            validator_spec=args.validator_adapter,
                            sandbox_kind=args.sandbox, out_dir=out_dir, effort=args.effort,
-                           max_cost=args.max_cost)
+                           max_cost=args.max_cost, feedback=not args.no_feedback,
+                           lessons=lessons,
+                           record_training_signals=args.record_training_signals)
     t = report.totals
     print(f"recall={t['recall']:.0%} confirmed_recall={t['confirmed_recall']:.0%} "
           f"rejection_rate={t['rejection_rate']:.0%} "
@@ -113,8 +143,58 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         skipped = ", ".join(t.get("skipped_targets") or []) or "none"
         print(f"spending cap ${t['max_cost_usd']:.2f} reached; results are incomplete "
               f"(skipped targets: {skipped})")
+    if args.export_lessons:
+        from .feedback import export_lessons
+        store = Store(out_dir / "benchmark.sqlite")
+        try:
+            exported = export_lessons(store, t["run_ids"])
+        finally:
+            store.close()
+        dest = Path(args.export_lessons)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(exported, indent=2) + "\n")
+        print(f"lessons: {len(exported['lessons'])} exported to {dest}")
     print(f"report: {out_dir / 'benchmark-report.md'}")
     return 0
+
+
+def cmd_feedback_eval(args: argparse.Namespace) -> int:
+    from .benchmark import load_spec
+    from .feedback_eval import run_feedback_eval
+
+    paid = [a for a in (args.adapter, args.validator_adapter) if a and a.startswith("anthropic:")]
+    if paid and args.max_cost is None:
+        print("error: feedback-eval runs several benchmarks; set --max-cost", file=sys.stderr)
+        return 2
+    out_dir = Path(args.out).resolve()
+    try:
+        holdout = load_spec(args.holdout)
+        train = load_spec(args.train) if args.train else None
+        print(f"OpenPlow feedback-eval  holdout='{holdout.name}'  "
+              f"train={repr(train.name) if train else 'none'}  compare={args.compare}  "
+              f"finder={args.adapter}  validator={args.validator_adapter or args.adapter}")
+        report = run_feedback_eval(holdout, train_spec=train, compare=args.compare,
+                                   finder_spec=args.adapter,
+                                   validator_spec=args.validator_adapter,
+                                   sandbox_kind=args.sandbox, out_dir=out_dir,
+                                   effort=args.effort, max_cost=args.max_cost,
+                                   repeats=args.repeats, in_run_feedback=args.in_run_feedback,
+                                   min_count=args.min_count)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"verdict: {report.verdict}")
+    print(f"reason: {report.verdict_reason}")
+    print(f"estimated cost: ${report.cost_usd:.4f}")
+    print(f"report: {out_dir / 'feedback-eval.md'}")
+    return 1 if report.verdict == "regressed" else 0
+
+
+def _at_least_one(text: str) -> int:
+    n = int(text)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {n}")
+    return n
 
 
 def cmd_rescore(args: argparse.Namespace) -> int:
@@ -185,6 +265,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="stop making model calls once estimated spend reaches this")
     run.add_argument("--resume", default=None, metavar="RUN_ID",
                      help="resume an interrupted run")
+    run.add_argument("--lessons", default=None, metavar="FILE",
+                     help="import a lessons file (from benchmark --export-lessons)")
+    run.add_argument("--no-feedback", action="store_true",
+                     help="do not put lessons learned in this run into later hunt prompts "
+                          "(imported lessons still apply)")
     run.set_defaults(func=cmd_run)
 
     bm = sub.add_parser("benchmark", help="run the pipeline over a benchmark spec and score it")
@@ -198,7 +283,44 @@ def build_parser() -> argparse.ArgumentParser:
     bm.add_argument("--out", default="openplow-benchmarks", help="output directory")
     bm.add_argument("--max-cost", type=float, default=None, metavar="USD",
                     help="spending cap shared by all targets; later targets are skipped")
+    bm.add_argument("--lessons", default=None, metavar="FILE",
+                    help="import a lessons file into every target's run")
+    bm.add_argument("--no-feedback", action="store_true",
+                    help="do not put lessons learned in a run into its later hunt prompts")
+    bm.add_argument("--record-training-signals", action="store_true",
+                    help="record missed known vulns and decoy false positives as lessons "
+                         "(training benchmarks only)")
+    bm.add_argument("--export-lessons", default=None, metavar="FILE",
+                    help="write the lessons from every target's run to FILE after the run")
     bm.set_defaults(func=cmd_benchmark)
+
+    fe = sub.add_parser("feedback-eval",
+                        help="test learned lessons on a held-out benchmark (baseline vs "
+                             "with lessons) and give a verdict")
+    fe.add_argument("holdout", help="the held-out benchmark spec (never trained on)")
+    fe.add_argument("--train", default=None, metavar="SPEC",
+                    help="training benchmark spec to learn lessons on (needed for "
+                         "--compare imported)")
+    fe.add_argument("--compare", default="imported", choices=["imported", "in-run"],
+                    help="imported: baseline vs lessons learned on --train (default); "
+                         "in-run: in-run feedback off vs on, no training")
+    fe.add_argument("--adapter", default="stub", help="finder model adapter")
+    fe.add_argument("--validator-adapter", default=None, help="validator adapter")
+    fe.add_argument("--sandbox", default="stub", choices=["stub", "unshare"])
+    fe.add_argument("--effort", default="high",
+                    choices=["low", "medium", "high", "xhigh", "max"],
+                    help="model effort for Anthropic adapters (default high)")
+    fe.add_argument("--max-cost", type=float, default=None, metavar="USD",
+                    help="one spending cap shared by every phase; required for anthropic: "
+                         "adapters")
+    fe.add_argument("--repeats", type=_at_least_one, default=1, metavar="N",
+                    help="held-out runs per arm, averaged (default 1)")
+    fe.add_argument("--in-run-feedback", action="store_true",
+                    help="imported mode: let both held-out arms also use in-run lessons")
+    fe.add_argument("--min-count", type=_at_least_one, default=1, metavar="N",
+                    help="export only lessons seen at least N times in training (default 1)")
+    fe.add_argument("--out", default="openplow-feedback-eval", help="output directory")
+    fe.set_defaults(func=cmd_feedback_eval)
 
     rs = sub.add_parser("rescore", help="re-score a saved benchmark run with the current "
                                         "dedup and scoring rules (no model calls)")
