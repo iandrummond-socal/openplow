@@ -119,12 +119,14 @@ def test_invariant_sweep_finds_nothing_of_the_host(tmp_path: Path):
 
 
 @needs_unshare
+@needs_python
 def test_minimal_root_twin_secret_is_readable_without_it(tmp_path: Path):
     secret = _secret(tmp_path)
     res = _py(_sandbox(tmp_path, minimal_root=False), f"print(open({str(secret)!r}).read())")
     assert "PRIVATE KEY MATERIAL" in res.stdout, res.stderr
-    res = _py(_sandbox(tmp_path, expose=(tmp_path / "fakehome",)),
-              f"print(open({str(secret)!r}).read())")
+    # An explicit expose replaces the test interpreter's roots, so run python3 by name.
+    res = _named(_sandbox(tmp_path, expose=(tmp_path / "fakehome",)),
+                 f"print(open({str(secret)!r}).read())")
     assert "PRIVATE KEY MATERIAL" in res.stdout, res.stderr  # expose is the deliberate hole
 
 
@@ -218,6 +220,7 @@ def test_target_and_scratch_semantics_are_unchanged(tmp_path: Path, inside_scrat
 
 
 @needs_unshare
+@needs_python
 def test_expose_makes_a_path_visible_read_only(tmp_path: Path):
     extra = tmp_path / "extra"
     extra.mkdir()
@@ -231,7 +234,7 @@ def test_expose_makes_a_path_visible_read_only(tmp_path: Path):
             "except OSError as e:\n"
             "    print('EROFS' if e.errno == 30 else e.errno)\n"
             f"print(os.path.exists({str(tmp_path / 'fakehome')!r}))\n")
-    res = _py(_sandbox(tmp_path, expose=(extra,)), code)
+    res = _named(_sandbox(tmp_path, expose=(extra,)), code)
     assert res.stdout.split() == ["exposed", "EROFS", "False"], (res.stdout, res.stderr)
 
 
@@ -297,6 +300,7 @@ def test_minimal_root_needs_minimal_dev(tmp_path: Path):
 
 
 @needs_unshare
+@needs_python
 def test_everything_in_the_new_root_is_read_only_even_with_readonly_fs_off(tmp_path: Path):
     extra = tmp_path / "extra"
     extra.mkdir()
@@ -312,7 +316,7 @@ def test_everything_in_the_new_root_is_read_only_even_with_readonly_fs_off(tmp_p
             "for p in paths:\n"
             "    print(p, w(p))\n"
             f"print(w({str(tmp_path / 'scratch' / 'ok')!r}))\n")
-    res = _py(_sandbox(tmp_path, readonly_fs=False, expose=(extra,)), code)
+    res = _named(_sandbox(tmp_path, readonly_fs=False, expose=(extra,)), code)
     lines = res.stdout.splitlines()
     assert lines and lines[-1] == "WRITABLE", (res.stdout, res.stderr)
     assert all(line.endswith("EROFS") for line in lines[:-1]), lines
@@ -407,6 +411,7 @@ def test_setup_failure_fails_closed(tmp_path: Path):
 
 
 @needs_unshare
+@needs_python
 def test_build_sandbox_reads_the_expose_variable(tmp_path: Path, monkeypatch):
     extra = tmp_path / "extra"
     extra.mkdir()
@@ -414,7 +419,10 @@ def test_build_sandbox_reads_the_expose_variable(tmp_path: Path, monkeypatch):
     code = f"print(open({str(extra / 'x.txt')!r}).read())"
     monkeypatch.setenv("OPENPLOW_SANDBOX_EXPOSE", str(extra))
     sb = build_sandbox("unshare", tmp_path / "scratch", timeout=20)
-    assert _py(sb, code).stdout.strip() == "seen"
+    assert _named(sb, code).stdout.strip() == "seen"
     monkeypatch.delenv("OPENPLOW_SANDBOX_EXPOSE")
     sb = build_sandbox("unshare", tmp_path / "scratch2", timeout=20)
-    assert "seen" not in _py(sb, code).stdout
+    res = _named(sb, code)
+    # The payload must run and fail to find the file, or an interpreter that never
+    # started would pass this for the wrong reason.
+    assert res.returncode != 0 and "FileNotFoundError" in res.stderr, (res.stdout, res.stderr)

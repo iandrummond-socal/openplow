@@ -40,5 +40,11 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: pip install -e '.[dev]'
+      # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, which
+      # skipped every real-sandbox test. Lift it, and make a lost sandbox a red run.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # No API key: the suite runs on fake adapters and the fixture benchmarks.
-      - run: python -m pytest -q
+      # -rs prints every skip's reason, so a skip can't hide in a green run.
+      - run: python -m pytest -q -rs
+        env:
+          OPENPLOW_REQUIRE_SANDBOX: "1"
