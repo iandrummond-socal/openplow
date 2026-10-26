@@ -46,6 +46,9 @@ class PocRun:
     returncode: int | None = None
     output: str = ""
     reason: str = ""
+    # The sandbox's wall-clock limit killed the PoC, so feedback can classify a
+    # timeout from a flag rather than by parsing ``reason``.
+    timed_out: bool = False
     # Which sandbox protections were active for this run (``SandboxResult.enforced``).
     enforced: dict[str, bool] = field(default_factory=dict)
 
@@ -166,7 +169,8 @@ def run_poc(sandbox: Sandbox, repo: Path, finding: dict[str, Any],
         reason = f"PoC did not reproduce (exit {rc})"
 
     return PocRun(attempted=True, demonstrated=demonstrated, integrity_ok=integrity_ok,
-                  returncode=rc, output=output, reason=reason, enforced=enforced)
+                  returncode=rc, output=output, reason=reason, timed_out=timed_out,
+                  enforced=enforced)
 
 
 # ---- patch application --------------------------------------------------

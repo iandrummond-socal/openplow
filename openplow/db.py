@@ -84,6 +84,18 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at      REAL NOT NULL
 );
 
+-- Lesson signals: typed failures the feedback loop turns into prompt guidance.
+-- source is 'learned' (this run) or 'imported' (from a lessons file).
+CREATE TABLE IF NOT EXISTS lessons (
+    run_id       TEXT NOT NULL,
+    attack_class TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'learned',
+    count        INTEGER NOT NULL DEFAULT 0,
+    updated_at   REAL NOT NULL,
+    PRIMARY KEY (run_id, attack_class, kind, source)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_run_status ON tasks (run_id, status);
 CREATE INDEX IF NOT EXISTS idx_findings_run ON findings (run_id);
 CREATE INDEX IF NOT EXISTS idx_usage_run ON usage (run_id);
@@ -169,14 +181,20 @@ class Store:
             return cur.rowcount > 0
 
     def next_pending(self, run_id: str, stage: str | None = None) -> Task | None:
-        """Claim the next pending task atomically and mark it running."""
+        """Claim the next pending task atomically and mark it running.
+
+        Validations are claimed first so a hunt's failures are recorded before
+        the next hunt's prompt is built. ``rowid`` breaks ``created_at`` ties
+        (on Windows ``time.time()`` steps ~15 ms), keeping enqueue order.
+        """
         with self._tx() as c:
             q = "SELECT * FROM tasks WHERE run_id = ? AND status = 'pending'"
             args: list[Any] = [run_id]
             if stage is not None:
                 q += " AND stage = ?"
                 args.append(stage)
-            q += " ORDER BY created_at LIMIT 1"
+            q += (" ORDER BY CASE stage WHEN 'validate' THEN 0 ELSE 1 END, created_at, rowid"
+                  " LIMIT 1")
             row = c.execute(q, args).fetchone()
             if row is None:
                 return None
@@ -256,6 +274,46 @@ class Store:
         rows = self._conn.execute(
             "SELECT stage, item, created_at FROM wishlist WHERE run_id = ? ORDER BY created_at",
             (run_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- lessons --------------------------------------------------------
+
+    def add_lesson_signal(self, run_id: str, attack_class: str, kind: str, *,
+                          source: str = "learned", n: int = 1) -> None:
+        """Add ``n`` to a lesson count (the first signal inserts the row)."""
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO lessons (run_id, attack_class, kind, source, count, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, attack_class, kind, source) DO UPDATE SET "
+                "count = count + excluded.count, updated_at = excluded.updated_at",
+                (run_id, attack_class, kind, source, n, _now()),
+            )
+
+    def set_lesson_signal(self, run_id: str, attack_class: str, kind: str, *,
+                          source: str = "imported", count: int) -> None:
+        """Set a lesson count outright, so re-importing a lessons file is idempotent."""
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO lessons (run_id, attack_class, kind, source, count, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, attack_class, kind, source) DO UPDATE SET "
+                "count = excluded.count, updated_at = excluded.updated_at",
+                (run_id, attack_class, kind, source, count, _now()),
+            )
+
+    def lesson_signals(self, run_id: str, *,
+                       sources: tuple[str, ...] = ("learned", "imported")) -> list[dict[str, Any]]:
+        """Lesson rows of a run from the given sources, in a stable order."""
+        if not sources:
+            return []
+        marks = ", ".join("?" for _ in sources)
+        rows = self._conn.execute(
+            "SELECT attack_class, kind, source, count FROM lessons "
+            f"WHERE run_id = ? AND source IN ({marks}) "
+            "ORDER BY attack_class, kind, source",
+            (run_id, *sources),
         ).fetchall()
         return [dict(r) for r in rows]
 

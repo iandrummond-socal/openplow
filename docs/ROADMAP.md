@@ -30,7 +30,7 @@ Components 1–8, one repo, CLI only.
 - [x] Sandbox: seccomp refuses `socket(AF_UNIX)` with EPERM by default, so the payload cannot reach host daemons (ssh-agent, DBus, `docker.sock`); `socketpair` is always allowed. This breaks a PoC that runs its own unix-socket server; the opt-in is `allow_unix_sockets=True`. Reported as `unix_sockets_blocked` in `enforced` (`sandbox.py`, `_sandbox_init.py`)
 - [x] `scripts/test_linux.sh` can run the suite as a non-root user (`OPENPLOW_TEST_USER=<uid>`)
 - [x] ~~Sandbox: hide `/run`, `/tmp` and a real `/var/run`~~ superseded by the minimal read-only root: those paths are no longer in the payload's world, so `allow_unix_sockets=True` cannot reach host sockets there
-- [ ] Sandbox: automated isolation PoC tests (`tests/test_sandbox_isolation.py`). The `/dev`, `/proc` and unix-socket behaviour was checked by hand probes only; the BPF filter has unit tests
+- [x] Sandbox: automated isolation PoC tests (`tests/test_sandbox_isolation.py`): small hostile programs run in a real `unshare` sandbox and must fail, with a twin that switches the protection off and gets through; Linux only, skipped on macOS
 - [x] Sandbox: minimal read-only root, so the payload cannot read `$HOME` and the rest of the host filesystem. A fresh tmpfs root (`pivot_root`) holds the host's `/usr` and `/bin /lib*` read-only, a synthesised `/etc`, an empty `/tmp`, `/dev`, `/proc`, scratch and the target; a runtime outside `/usr` needs `expose=` (or `OPENPLOW_SANDBOX_EXPOSE`). On by default, off with `minimal_root=False`; reported as `minimal_root` in `enforced`. Verified on aarch64 under Docker, as root and as uid 1000; Linux only (`sandbox.py`, `_sandbox_init.py`, `tests/test_sandbox_root.py`)
 - [ ] Sandbox: loopback networking (`lo` up) as a transport for PoCs that need a local server
 - [ ] Sandbox: a non-privileged Linux CI job, and runtime verification on x86_64 (the x86_64 filter has unit tests but has not been run on an x86_64 kernel)
@@ -51,7 +51,8 @@ Components 9–13 plus an evaluation suite.
 - [x] CVE benchmark suite: 4 real-advisory reproductions (CVE-2007-4559, Zip Slip, SQLi, cmd injection) with working PoCs + real fixes; all confirm and pass the patch gate (`benchmarks/cve/`)
 - [x] PoC integrity model: only edits to *pre-existing* source count as tampering (new files an exploit creates are fine); patch gate uses separate fresh copies for before/after
 - [x] Real-model run wired up: `AnthropicAdapter` with effort + usage capture, `MeteredAdapter`, `pricing.py` cost estimation, `scripts/run_real.sh` one-command runner with preflight; run and benchmark print estimated cost
-- [ ] Feedback loop: rewrite queued prompts from failures, tested on a held-out repo
+- [x] Feedback loop: typed lesson signals from validation and hunter failures shape every hunt still in the queue (validations are claimed first); lessons export and import as a text-free file; `openplow feedback-eval` tests them on a held-out benchmark (`feedback.py`, `feedback_eval.py`)
+- [ ] Feedback loop: a model-written prompt rewriter, gated by `feedback-eval`
 - [ ] More gapfill rounds driven by a coverage metric rather than a fixed cap
 - [x] Decoy targets: CVE look-alikes with no bug; confirmed findings on them are scored as false positives (`benchmarks/decoys/`, `"decoy": true` in a spec)
 - [x] Add upstream CVE-fix targets (check out the pre-fix commit) alongside the reproductions: `benchmarks/upstream/` (zipp DoS CVE-2024-8088, PyJWT key confusion CVE-2022-29217), renamed so the finder cannot recall the advisory; PoCs + fixes pass the gate

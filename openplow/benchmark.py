@@ -39,6 +39,21 @@ Spec format (JSON)::
     }
 
 Paths in the spec are relative to the spec file's directory.
+
+**Coverage cells.** ``cells_covered`` counts the distinct ``(area, attack_class)``
+cells (Cloudflare's coverage measure) that hold at least one *confirmed,
+canonical* finding on a *non-decoy* target. Unvalidated, rejected, duplicate and
+decoy findings never raise it, so filing noise cannot look like coverage.
+
+**Lessons and training signals** (the feedback loop, see ``feedback.py``). A
+benchmark can import a lessons file into every target's run (``lessons=``), turn
+in-run feedback off (``feedback=False``), and record the two training-only
+signals that need ground truth (``record_training_signals=True``): each known
+vuln missed becomes ``missed_known`` on the manifest's class, and each confirmed
+finding on a decoy becomes ``false_positive`` on its class. Training signals are
+written *after* the target's run has finished, so they never shape that
+target's own prompts; they only reach a lessons file exported from the run ids
+in ``totals["run_ids"]``.
 """
 
 from __future__ import annotations
@@ -49,6 +64,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import feedback as feedback_mod
 from . import pricing
 from .context import RunContext
 from .db import Store
@@ -83,20 +99,52 @@ class BenchmarkSpec:
 
 
 def load_spec(path: str | Path) -> BenchmarkSpec:
+    """Read a spec file, refusing a malformed one with a ``ValueError`` that names
+    the problem (a target that is not an object, a missing ``name`` or ``path``,
+    a field of the wrong type). Callers catch ``ValueError`` and exit 2; a raw
+    ``KeyError`` or ``TypeError`` would escape them and read as a crash, or as
+    some other exit code that means something else."""
     p = Path(path).resolve()
     raw = json.loads(p.read_text(encoding="utf-8"))
-    targets = [
-        TargetSpec(
-            name=t["name"], path=t["path"],
-            expected=[ExpectedVuln(**e) for e in t.get("expected", [])],
-            decoy=bool(t.get("decoy", False)),
-        )
-        for t in raw.get("targets", [])
-    ]
+    if not isinstance(raw, dict):
+        raise ValueError(f"spec {p}: the top level must be a JSON object")  # noqa: TRY004 - CLI refusal
+    raw_targets = raw.get("targets", [])
+    if not isinstance(raw_targets, list):
+        raise ValueError(f"spec {p}: 'targets' must be a list")  # noqa: TRY004 - CLI refusal
+    targets = [_target_spec(p, i, t) for i, t in enumerate(raw_targets)]
     for t in targets:
         if t.decoy and t.expected:
             raise ValueError(f"decoy target {t.name!r} must not list expected vulns")
-    return BenchmarkSpec(name=raw.get("name", p.stem), base_dir=p.parent, targets=targets)
+    name = raw.get("name", p.stem)
+    if not isinstance(name, str):
+        raise ValueError(f"spec {p}: 'name' must be a string")  # noqa: TRY004 - CLI refusal
+    return BenchmarkSpec(name=name, base_dir=p.parent, targets=targets)
+
+
+def _target_spec(p: Path, i: int, t: Any) -> TargetSpec:
+    where = f"spec {p}: target {i}"
+    if not isinstance(t, dict):
+        raise ValueError(f"{where} must be a JSON object")  # noqa: TRY004 - CLI refusal
+    for key in ("name", "path"):
+        if not isinstance(t.get(key), str) or not t[key]:
+            raise ValueError(f"{where} needs a non-empty string {key!r}")
+    where = f"spec {p}: target {t['name']!r}"
+    raw_expected = t.get("expected", [])
+    if not isinstance(raw_expected, list):
+        raise ValueError(f"{where}: 'expected' must be a list")  # noqa: TRY004 - CLI refusal
+    expected = []
+    for j, e in enumerate(raw_expected):
+        if not isinstance(e, dict):
+            raise ValueError(f"{where}: expected vuln {j} must be a JSON object")  # noqa: TRY004 - CLI refusal
+        try:
+            expected.append(ExpectedVuln(**e))
+        except TypeError as exc:
+            raise ValueError(f"{where}: expected vuln {j} is malformed ({exc})") from None
+        for key in ("id", "file", "attack_class"):
+            if not isinstance(e[key], str):
+                raise ValueError(f"{where}: expected vuln {j} needs a string {key!r}")  # noqa: TRY004 - CLI refusal
+    return TargetSpec(name=t["name"], path=t["path"], expected=expected,
+                      decoy=bool(t.get("decoy", False)))
 
 
 # ---- scoring ------------------------------------------------------------
@@ -136,11 +184,26 @@ class TargetScore:
     rejection_rate: float
     decoy: bool = False
     false_positives: int = 0
+    cells_covered: int = 0
 
 
 def _is_duplicate(f: dict[str, Any]) -> bool:
     d = f.get("dedup")
     return bool(d) and not d.get("canonical", True)
+
+
+def _cell(finding: dict[str, Any]) -> tuple[str, str] | None:
+    """The ``(area, attack_class)`` cell a finding was hunted in, from its
+    ``provenance.task_id`` (``hunt:<area>:<class>``, also stamped on gapfill
+    hunts); ``None`` when there is no such provenance."""
+    task_id = (finding.get("provenance") or {}).get("task_id", "")
+    # The class is the last field (attack classes never hold ":"); the area is
+    # everything between, so an area that holds ":" stays whole.
+    head, _, rest = task_id.partition(":")
+    area, sep, cls = rest.rpartition(":")
+    if head == "hunt" and sep and area and cls:
+        return area, cls
+    return None
 
 
 def score_target(spec: TargetSpec, findings: list[dict[str, Any]]) -> TargetScore:
@@ -169,6 +232,8 @@ def score_target(spec: TargetSpec, findings: list[dict[str, Any]]) -> TargetScor
     false_positives = len(confirmed) if spec.decoy else 0
     if spec.decoy:
         unmatched_confirmed = 0
+    # Coverage counts only surviving findings on real targets: a decoy covers nothing.
+    cells = set() if spec.decoy else {c for c in map(_cell, confirmed) if c is not None}
 
     def _ratio(n: int, d: int) -> float:
         return round(n / d, 3) if d else 0.0
@@ -187,6 +252,7 @@ def score_target(spec: TargetSpec, findings: list[dict[str, Any]]) -> TargetScor
         rejection_rate=_ratio(len(rejected), candidates),
         decoy=spec.decoy,
         false_positives=false_positives,
+        cells_covered=len(cells),
     )
 
 
@@ -219,6 +285,7 @@ def _aggregate(name: str, finder: str, validator: str,
         "decoy_targets": sum(1 for s in scores if s.decoy),
         "decoys_clean": sum(1 for s in scores if s.decoy and not s.false_positives),
         "false_positives": sum(s.false_positives for s in scores),
+        "cells_covered": sum(s.cells_covered for s in scores),
     }
     return BenchmarkReport(name=name, finder=finder, validator=validator,
                            targets=scores, totals=totals)
@@ -228,17 +295,31 @@ def _aggregate(name: str, finder: str, validator: str,
 
 def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str | None,
                   sandbox_kind: str, out_dir: Path, effort: str | None = None,
-                  max_cost: float | None = None) -> BenchmarkReport:
+                  max_cost: float | None = None, feedback: bool = True,
+                  lessons: dict[str, Any] | None = None,
+                  budget: pricing.Budget | None = None,
+                  record_training_signals: bool = False) -> BenchmarkReport:
     """Run every target and score it. With ``max_cost``, one spending cap is
     shared by all targets; once it is reached, the target in progress finishes
     without further model calls and the remaining targets are skipped (and
-    listed in the report, since their recall is not measured)."""
+    listed in the report, since their recall is not measured).
+
+    ``budget`` passes in a cap built elsewhere instead (so several benchmarks
+    can share one); giving both is refused. ``feedback`` switches in-run
+    lessons on or off, ``lessons`` is a lessons file imported into every
+    target's run, and ``record_training_signals`` writes the ground-truth
+    signals after each target is scored (see the module docstring)."""
+    if budget is not None and max_cost is not None:
+        raise ValueError("pass either max_cost or budget, not both")
     out_dir.mkdir(parents=True, exist_ok=True)
-    budget = pricing.Budget(max_cost) if max_cost is not None else None
+    if budget is None and max_cost is not None:
+        budget = pricing.Budget(max_cost)
+    classes = _attack_classes() if record_training_signals else set()
 
     scores: list[TargetScore] = []
     skipped: list[str] = []
     target_hashes: dict[str, str] = {}
+    run_ids: list[str] = []
     total_cost = 0.0
     cost_priced = True
     for target in spec.targets:
@@ -248,6 +329,7 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
         repo = (spec.base_dir / target.path).resolve()
         target_hashes[target.name] = tree_digest(repo)
         run_id = f"bench-{target.name}-{uuid.uuid4().hex[:8]}"
+        run_ids.append(run_id)
         target_out = out_dir / run_id
         target_out.mkdir(parents=True, exist_ok=True)
         store = Store(out_dir / "benchmark.sqlite")
@@ -258,9 +340,18 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
                                    store, run_id, repo.name, "validator")
         ctx = RunContext(run_id=run_id, repo=repo, out_dir=target_out, store=store,
                          finder=finder, validator=validator,
-                         sandbox=build_sandbox(sandbox_kind, target_out / "scratch"))
+                         sandbox=build_sandbox(sandbox_kind, target_out / "scratch"),
+                         feedback=feedback)
+        if lessons is not None:
+            feedback_mod.import_lessons(store, run_id, lessons)
         start_run(ctx)
-        scores.append(score_target(target, store.findings(run_id)))
+        findings = store.findings(run_id)
+        score = score_target(target, findings)
+        scores.append(score)
+        # A target the cap cut short has misses that are not real misses: they
+        # would teach `missed_known` for bugs the hunter never got to look for.
+        if record_training_signals and not (budget is not None and budget.exhausted):
+            _record_training_signals(store, run_id, target, score, findings, classes)
         c, priced = _run_cost(store, run_id)
         total_cost += c
         cost_priced = cost_priced and priced
@@ -271,12 +362,42 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
     report = _aggregate(spec.name, finder_name, validator_name, scores)
     report.totals["estimated_cost_usd"] = round(total_cost, 4)
     report.totals["cost_fully_priced"] = cost_priced
-    report.totals["max_cost_usd"] = max_cost
+    report.totals["max_cost_usd"] = budget.limit if budget is not None else None
     report.totals["cap_reached"] = bool(budget and budget.exhausted)
     report.totals["skipped_targets"] = skipped
     report.totals["target_hashes"] = target_hashes
+    report.totals["run_ids"] = run_ids
     _write_report(report, out_dir)
     return report
+
+
+def _attack_classes() -> set[str]:
+    # Imported lazily, as feedback.py does: stages import feedback at call time.
+    from .stages.recon import ATTACK_CLASSES
+
+    return set(ATTACK_CLASSES)
+
+
+def _record_training_signals(store: Store, run_id: str, target: TargetSpec, score: TargetScore,
+                             findings: list[dict[str, Any]], classes: set[str]) -> None:
+    """Write the two ground-truth signals for a target that has finished running.
+
+    Each known vuln missed → ``missed_known`` on the manifest's class; on a
+    decoy, each confirmed canonical finding → ``false_positive`` on its class.
+    A class outside ``ATTACK_CLASSES`` is skipped, as ``feedback.record`` does.
+    """
+    by_id = {e.id: e for e in target.expected}
+    for vuln_id in score.missed:
+        exp = by_id[vuln_id]
+        if exp.attack_class in classes:
+            store.add_lesson_signal(run_id, exp.attack_class, "missed_known")
+    if target.decoy:
+        for f in findings:
+            if f.get("verdict") != "confirmed" or _is_duplicate(f):
+                continue
+            cls = f.get("attack_class", "unknown")
+            if cls in classes:
+                store.add_lesson_signal(run_id, cls, "false_positive")
 
 
 def _run_cost(store: Store, run_id: str) -> tuple[float, bool]:
@@ -316,6 +437,7 @@ def _write_report(report: BenchmarkReport, out_dir: Path) -> None:
         (f"- Validation rejection rate: {t['rejection_rate']:.0%} "
          f"({t['rejected']}/{t['candidates_total']})"),
         f"- Unmatched confirmed (possible FP or new bug): {t['unmatched_confirmed']}",
+        f"- Coverage cells (with a surviving finding): {t.get('cells_covered', 0)}",
         *([(f"- Decoys (no bug): clean {t['decoys_clean']}/{t['decoy_targets']}; "
             f"false positives (confirmed on a decoy): **{t['false_positives']}**")]
           if t.get("decoy_targets") else []),

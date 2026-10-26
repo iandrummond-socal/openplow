@@ -18,7 +18,13 @@ state and next steps. Read both before starting.
 | #6 | CI: ruff + pytest on Python 3.11 and 3.13 |
 | #7 | `openplow rescore`: re-score a saved run offline |
 
-The suite has 147 tests, all passing (24 of them run only on Linux), and lint is clean.
+At that point the suite had 147 tests, all passing (24 of them run only on Linux), and lint is clean.
+
+**Feedback loop (branch `task/feedback-loop`).**
+Failures are recorded as typed lesson signals and shown to every hunt still in the queue; lessons export and import as a text-free file; `openplow feedback-eval` tests them on a held-out benchmark (README, "Feedback loop").
+One visible behaviour change: the queue now claims `validate` tasks before `hunt` tasks (then oldest first), so each hunt's findings are judged, and their failures recorded, before the next hunt's prompt is built.
+Before, recon's hunts all ran before the first validation.
+On this Mac the suite is 247 passed, 75 skipped, and lint is clean.
 
 ## Results so far, and their limits
 
@@ -58,9 +64,8 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 
 ## Housekeeping on GitHub
 
-- **Delete the merged branches.** These are still on GitHub: `finder-repo-tools`,
-  `dedup-by-cwe`, `cost-controls`, `decoy-targets`, `neutral-cve-targets`, `ci`
-  and `rescore`. The cloud session could not delete remote branches.
+- **Merged branches: done.** The last fetch shows only `main` on GitHub, so the
+  branches of PRs #1–#7 are gone.
 - **Auto-delete future branches.** Turn on Settings → General → "Automatically
   delete head branches".
 - **Require CI.** Under Settings → Branches, make `lint`, `test (3.11)` and
@@ -72,6 +77,9 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 | --- | --- |
 | no credits | Sandbox bug: as a non-root user `> /dev/null` fails (EACCES on `open(O_CREAT)` of a minimal-`/dev` node); root is fine. Caused by `minimal_dev` (passes with `minimal_dev=False`). `tests/test_sandbox_isolation.py::test_dev_null_can_be_redirected_to` is a strict xfail for non-root: when it is fixed the test XPASSes and fails the run until the marker is removed |
 | no credits | Sandbox: `systemd-run --user` memory cap for desktop Linux, a non-privileged Linux CI job, loopback networking, runtime verification on x86_64 (roadmap M1) |
+| ~$2 credit | Decoys-only real run → first false-positive rate |
+| ~$5–6 credit | `benchmarks/cve-and-decoys.json` real run → honest recall and false positives in one report |
+| more than the credit left | First real `feedback-eval` run on the default split (`benchmarks/feedback/README.md`): training is about the `cve-and-decoys` run (~$5–6 above) plus two held-out runs, which is more than the ~$2.40 left. A Haiku-finder smoke run is the cheap first look. Never without Big Dawg's OK and a `--max-cost` cap below the credit left |
 
 Sandbox state: done on Linux are the read-only target, capability drop, seccomp,
 the delegated-cgroup cap, a minimal `/dev`, read-only `/proc` kernel controls, and
@@ -88,8 +96,6 @@ socket default breaks a PoC that runs its own unix-socket server; such a PoC nee
 `allow_unix_sockets=True`. `scripts/test_linux.sh` can run the tests as a non-root
 user with `OPENPLOW_TEST_USER=<uid>`. On macOS and Windows the `stub` backend
 enforces none of this.
-| ~$2 credit | Decoys-only real run → first false-positive rate |
-| ~$5–6 credit | `benchmarks/cve-and-decoys.json` real run → honest recall and false positives in one report |
 
 API credit left at handoff: about $2.40 by estimate. Check the Anthropic
 console for the real figure.

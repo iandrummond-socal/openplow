@@ -20,6 +20,14 @@ Model output is parsed and schema-checked before anything is persisted; a
 finding that does not parse or is missing required fields is dropped and logged
 to the wishlist rather than stored half-formed.
 
+Lessons from the feedback loop (``openplow.feedback``) are appended to the *user*
+prompt, never the system prompt, which is the cached prefix. They are computed
+when the task is claimed, so a hunt still in the queue picks up every failure
+recorded before it ran; the transcript's ``lessons`` lists exactly what the
+prompt held. A reply that cannot be parsed, is cut off at the output limit, or
+files a finding that is dropped as malformed records a lesson signal; refusals
+and transient or fatal call failures record none.
+
 Findings stream into the store as ``needs_validation`` the moment they are
 produced, so a crash loses only the task in flight. The validator stage, running
 a *different* model, judges them later.
@@ -35,8 +43,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .. import feedback, skill_loader
 from .. import findings as findings_mod
-from .. import skill_loader
 from ..context import RunContext
 from ..models import Outcome, served_model
 from ..repo_tools import RepoTools
@@ -102,8 +110,12 @@ def _area_files(repo: Path, area: str) -> list[str]:
 
 
 def _build_prompt(ctx: RunContext, area: str, attack_class: str,
-                  depth: int = 1, *, tools: bool = False) -> tuple[str, str]:
-    """Assemble (system, prompt) for a hunter from the skill + recon context."""
+                  depth: int = 1, *, tools: bool = False,
+                  lessons: list[str] | None = None) -> tuple[str, str]:
+    """Assemble (system, prompt) for a hunter from the skill + recon context.
+
+    ``lessons`` (feedback kinds) go at the end of the user prompt only; with
+    none the prompt is byte-identical to one built before the feedback loop."""
     class_prompt = skill_loader.load_class_prompt(attack_class)
     if class_prompt is None:
         class_prompt = f"(No vendored class file for {attack_class}; use general methodology.)"
@@ -133,6 +145,9 @@ def _build_prompt(ctx: RunContext, area: str, attack_class: str,
             "nothing. Look harder and from a different angle — chained or multi-step "
             "paths, edge cases, and assumptions the obvious review would skip."
         )
+    section = feedback.render(lessons or [])
+    if section:
+        prompt += "\n\n" + section
     return system, prompt
 
 
@@ -148,7 +163,9 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     depth = int(payload.get("depth", 1))
 
     use_tools = ctx.finder.supports_tools
-    system, prompt = _build_prompt(ctx, area, attack_class, depth, tools=use_tools)
+    kinds = feedback.lessons_for(ctx, attack_class)
+    system, prompt = _build_prompt(ctx, area, attack_class, depth, tools=use_tools,
+                                   lessons=kinds)
     if use_tools:
         resp = ctx.finder.complete_with_tools(system, prompt, RepoTools(ctx.repo),
                                               max_tokens=8192, max_rounds=_MAX_TOOL_ROUNDS)
@@ -164,6 +181,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         "fallbacks": (resp.raw or {}).get("fallbacks"),
         "system": system, "prompt": prompt, "text": resp.text,
         "transcript": (resp.raw or {}).get("transcript"),
+        "lessons": kinds,
     }
     transcript_path = _write_transcript(ctx, area, attack_class, depth, record)
 
@@ -188,9 +206,11 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
                            f"unparseable hunter output on {area}/{attack_class}; "
                            f"see {transcript_path}")
+        feedback.record(ctx, attack_class, "unparseable")
     if record["stop_reason"] == "max_tokens":
         ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
                            f"hunter output truncated (max_tokens) on {area}/{attack_class}")
+        feedback.record(ctx, attack_class, "truncated")
     record["parsed"] = len(parsed)
     record["drops"] = []
     existing_ids = {f["id"] for f in ctx.store.findings(ctx.run_id)}
@@ -224,6 +244,7 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
             record["drops"].append({"id": finding["id"], "problems": problems})
             ctx.store.add_wish(ctx.run_id, ctx.repo_name, "hunt",
                                f"dropped malformed finding {finding['id']}: {problems[0]}")
+            feedback.record(ctx, attack_class, "incomplete_finding")
             continue
         ctx.store.upsert_finding(ctx.run_id, ctx.repo_name, "hunt", finding)
         # Each new finding becomes a validation task.
