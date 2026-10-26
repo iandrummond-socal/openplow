@@ -17,6 +17,11 @@ Three checks, and the validator can never file a finding itself:
 The verdict combines them: a tampering PoC or one that fails to reproduce is
 rejected; an executed PoC that reproduces is confirmed unless the adversarial
 model disproves it; a non-executable PoC falls back to the model verdict.
+
+Each verdict that points at a weakness in how findings are written records one
+lesson signal (``openplow.feedback``) for the finding's attack class, at the
+point it is decided, so hunts still in the queue are told about it. A RETRYABLE
+validator records nothing: the retry decides, and records, the verdict.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import json
 import re
 from typing import Any
 
+from .. import feedback
 from .. import poc as poc_mod
 from ..context import RunContext
 from ..models import ModelResponse, Outcome, served_model
@@ -135,15 +141,35 @@ def _parse_verdict(text: str) -> str:
     return "needs_validation"
 
 
+def _unexecuted_kind(finding: dict[str, Any], run: poc_mod.PocRun) -> str | None:
+    """The lesson kind for a PoC that was not run, or ``None`` when none applies.
+
+    Decided from the PoC's declared kind, never the reason string: an ``input`` /
+    ``trace`` (or any other) PoC cannot confirm a bug, so the hunter should have
+    written a test or script; a test or script with neither content nor path is a
+    missing part. A test or script that was complete but not run lacked a runtime
+    on this machine, which no prompt can fix, so it records nothing."""
+    if run.attempted:
+        return None
+    poc = finding.get("poc") or {}
+    if poc.get("kind") not in ("test", "script"):
+        return "poc_not_executable"
+    if not poc.get("content") and not poc.get("path"):
+        return "incomplete_finding"
+    return None
+
+
 def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     finding_id = payload["finding_id"]
     matches = [f for f in ctx.store.findings(ctx.run_id) if f.get("id") == finding_id]
     if not matches:
         return {"finding_id": finding_id, "verdict": "missing"}
     finding = matches[0]
+    attack_class = finding.get("attack_class", "unknown")
 
     problems = _pass1_deterministic(ctx, finding)
     if problems:
+        feedback.record(ctx, attack_class, "incomplete_finding")
         finding["verdict"] = "rejected"
         finding["validation"] = {"checked_by": "deterministic", "disproof_attempted": False,
                                  "notes": "; ".join(problems)}
@@ -154,19 +180,32 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
     run = poc_mod.run_poc(ctx.sandbox, ctx.repo, finding,
                           ctx.out_dir / "scratch" / finding_id)
 
+    # Signals are recorded here, never inside the shared _reject, so each path
+    # records its own kind.
     if run.attempted and not run.integrity_ok:
+        feedback.record(ctx, attack_class, "poc_tampered")
         return _reject(ctx, finding, finding_id, f"poc-execution: {run.reason}", run)
     if run.attempted and not run.demonstrated:
+        feedback.record(ctx, attack_class,
+                        "poc_timeout" if run.timed_out else "poc_not_reproduced")
         return _reject(ctx, finding, finding_id, f"poc-execution: {run.reason}", run)
 
     # Adversarial model pass (can disprove even an executed PoC).
     verdict, notes, served_by = _pass2_adversarial(ctx, finding)
+
+    # Only after pass 2 returns: it raises on a RETRYABLE validator, and a signal
+    # recorded before it would be counted again by the retry.
+    unexecuted = _unexecuted_kind(finding, run)
+    if unexecuted is not None:
+        feedback.record(ctx, attack_class, unexecuted)
 
     if run.attempted and run.demonstrated:
         # Reproduced against untouched code. Confirm unless the model disproved it.
         verdict = "rejected" if verdict == "rejected" else "confirmed"
 
     finding["verdict"] = verdict
+    if verdict == "rejected":
+        feedback.record(ctx, attack_class, "disproved")
     if verdict != "confirmed":
         # Only a confirmed finding keeps a severity; clear any the finder set.
         finding["severity"] = None
@@ -183,6 +222,8 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         gate = poc_mod.run_patch_gate(ctx.sandbox, ctx.repo, finding,
                                       ctx.out_dir / "scratch" / finding_id / "gate")
         fix_verified = gate.passed
+        if gate.attempted and not gate.passed:
+            feedback.record(ctx, attack_class, "patch_failed")
         finding["fix"] = {
             "gate_passed": gate.passed, "reproduced_before": gate.reproduced_before,
             "patch_applied": gate.patch_applied, "reproduced_after": gate.reproduced_after,

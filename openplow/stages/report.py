@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .. import feedback
 from ..context import RunContext
 
 _SARIF_LEVEL = {"critical": "error", "high": "error", "medium": "warning",
@@ -114,6 +115,16 @@ def run_task(ctx: RunContext, payload: dict[str, Any]) -> dict[str, Any]:
         lines += ["## Wishlist (what hunters needed)", ""]
         for w in wishes:
             lines.append(f"- [{w['stage']}] {w['item']}")
+        lines.append("")
+
+    signals = feedback.summary(ctx.store, ctx.run_id)
+    if signals:
+        # Kind ids only: the templates live in feedback.py and would bloat the report.
+        lines += ["## Feedback (lesson signals)", "",
+                  "| Class | Kind | Source | Count |",
+                  "| --- | --- | --- | --- |"]
+        for s in signals:
+            lines.append(f"| {s['attack_class']} | {s['kind']} | {s['source']} | {s['count']} |")
         lines.append("")
 
     (ctx.out_dir / "REPORT.md").write_text("\n".join(lines) + "\n")

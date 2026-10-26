@@ -19,6 +19,7 @@ class RunContext:
     finder: ModelAdapter       # model that hunts
     validator: ModelAdapter    # a DIFFERENT model that tries to disprove
     sandbox: Sandbox
+    feedback: bool = True      # use lessons learned in this run when building prompts
 
     @property
     def repo_name(self) -> str:
