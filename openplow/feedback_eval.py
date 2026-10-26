@@ -22,6 +22,9 @@ Verdicts compare arm B with arm A, totals averaged over ``repeats``:
 
 * ``incomplete`` — the spending cap was reached or a target was skipped in any
   phase; nothing else is claimed, because the arms did not run the same work.
+* ``no change`` (zero lessons) — in ``imported`` mode, when training learned no
+  lessons, both arms ran the same prompts, so any difference between them is
+  noise; this is decided before any regression or win is considered.
 * ``regressed`` — B's confirmed recall fell, or B confirmed more findings on
   decoys (false positives).
 * ``improved`` — not regressed, and B raised confirmed recall, or covered more
@@ -29,6 +32,9 @@ Verdicts compare arm B with arm A, totals averaged over ``repeats``:
   rejection rate *while filing at least as many candidates*. A lower rejection
   rate earned by filing less is not a win.
 * ``no change`` — otherwise, with the reason stated.
+
+They are checked in that order: incomplete, zero lessons, regressed,
+improved, no change.
 
 The honesty rule: one run per arm is one sample, and real models are noisy. The
 report says so plainly; ``repeats`` exists for when credit allows. Arm order
@@ -83,18 +89,39 @@ class EvalReport:
 
 def check_disjoint(train: BenchmarkSpec, holdout: BenchmarkSpec) -> None:
     """Refuse a held-out benchmark that shares a target with the training one,
-    by name or by source content (``poc.tree_digest``, so a renamed copy is
-    caught too). Training on a held-out target would make the test meaningless."""
-    train_names = {t.name for t in train.targets}
-    train_digests = {tree_digest((train.base_dir / t.path).resolve()): t.name
-                     for t in train.targets}
-    for t in holdout.targets:
-        if t.name in train_names:
-            raise ValueError(f"held-out target {t.name!r} is also a training target "
+    by name, by source content (``poc.tree_digest``, so a renamed copy is caught
+    too), or by one target's directory lying inside the other's (the outer one
+    would train on, or be tested on, the inner one's code). Training on a
+    held-out target would make the test meaningless.
+
+    A missing or empty target directory is refused first, with its own message:
+    every empty tree has the same digest, so two of them would otherwise be
+    reported as "the same source", which is true but sends the reader the
+    wrong way."""
+    def _dirs(spec: BenchmarkSpec, role: str) -> dict[str, Path]:
+        out: dict[str, Path] = {}
+        for t in spec.targets:
+            d = (spec.base_dir / t.path).resolve()
+            if not d.is_dir() or not any(d.iterdir()):
+                raise ValueError(f"{role} target {t.name!r}: directory {d} is missing or empty")
+            out[t.name] = d
+        return out
+
+    train_dirs = _dirs(train, "training")
+    hold_dirs = _dirs(holdout, "held-out")
+    train_digests = {tree_digest(d): name for name, d in train_dirs.items()}
+    for name, d in hold_dirs.items():
+        if name in train_dirs:
+            raise ValueError(f"held-out target {name!r} is also a training target "
                              "(same name); the held-out set must be disjoint from training")
-        digest = tree_digest((holdout.base_dir / t.path).resolve())
+        for tname, td in train_dirs.items():
+            if d.is_relative_to(td) or td.is_relative_to(d):
+                raise ValueError(f"held-out target {name!r} ({d}) and training target "
+                                 f"{tname!r} ({td}) overlap: one directory is inside the "
+                                 "other; the held-out set must be disjoint from training")
+        digest = tree_digest(d)
         if digest in train_digests:
-            raise ValueError(f"held-out target {t.name!r} has the same source as training "
+            raise ValueError(f"held-out target {name!r} has the same source as training "
                              f"target {train_digests[digest]!r}; the held-out set must be "
                              "disjoint from training")
 
@@ -217,6 +244,12 @@ def _verdict(a: dict[str, Any], b: dict[str, Any], incomplete: list[str], *,
     if incomplete:
         return "incomplete", ("the arms did not run the same work, so nothing is claimed ("
                               + "; ".join(incomplete) + ")")
+    # With nothing learned, both arms ran identical prompts: any difference,
+    # better or worse, is the model's own noise, so neither a win nor a
+    # regression is claimed.
+    if compare == "imported" and lessons is not None and not lessons["lessons"]:
+        return "no change", ("no lessons were learned in training, so both arms ran the same "
+                             "prompts; any difference is noise")
 
     def moved(key: str, verb: str) -> str:
         return f"{_LABELS[key].lower()} {verb} from {_fmt(key, a[key])} to {_fmt(key, b[key])}"
@@ -248,8 +281,6 @@ def _verdict(a: dict[str, Any], b: dict[str, Any], incomplete: list[str], *,
         return "improved", "; ".join(wins)
     if caveat:
         return "no change", caveat
-    if compare == "imported" and lessons is not None and not lessons["lessons"]:
-        return "no change", "no lessons were learned in training, so both arms ran the same prompts"
     moves = [moved(k, "rose" if b[k] > a[k] else "fell")
              for k in ("confirmed_recall", "false_positives", "rejection_rate", "cells_covered")
              if b[k] != a[k]]

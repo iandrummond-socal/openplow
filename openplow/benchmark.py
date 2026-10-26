@@ -99,20 +99,52 @@ class BenchmarkSpec:
 
 
 def load_spec(path: str | Path) -> BenchmarkSpec:
+    """Read a spec file, refusing a malformed one with a ``ValueError`` that names
+    the problem (a target that is not an object, a missing ``name`` or ``path``,
+    a field of the wrong type). Callers catch ``ValueError`` and exit 2; a raw
+    ``KeyError`` or ``TypeError`` would escape them and read as a crash, or as
+    some other exit code that means something else."""
     p = Path(path).resolve()
     raw = json.loads(p.read_text(encoding="utf-8"))
-    targets = [
-        TargetSpec(
-            name=t["name"], path=t["path"],
-            expected=[ExpectedVuln(**e) for e in t.get("expected", [])],
-            decoy=bool(t.get("decoy", False)),
-        )
-        for t in raw.get("targets", [])
-    ]
+    if not isinstance(raw, dict):
+        raise ValueError(f"spec {p}: the top level must be a JSON object")  # noqa: TRY004 - CLI refusal
+    raw_targets = raw.get("targets", [])
+    if not isinstance(raw_targets, list):
+        raise ValueError(f"spec {p}: 'targets' must be a list")  # noqa: TRY004 - CLI refusal
+    targets = [_target_spec(p, i, t) for i, t in enumerate(raw_targets)]
     for t in targets:
         if t.decoy and t.expected:
             raise ValueError(f"decoy target {t.name!r} must not list expected vulns")
-    return BenchmarkSpec(name=raw.get("name", p.stem), base_dir=p.parent, targets=targets)
+    name = raw.get("name", p.stem)
+    if not isinstance(name, str):
+        raise ValueError(f"spec {p}: 'name' must be a string")  # noqa: TRY004 - CLI refusal
+    return BenchmarkSpec(name=name, base_dir=p.parent, targets=targets)
+
+
+def _target_spec(p: Path, i: int, t: Any) -> TargetSpec:
+    where = f"spec {p}: target {i}"
+    if not isinstance(t, dict):
+        raise ValueError(f"{where} must be a JSON object")  # noqa: TRY004 - CLI refusal
+    for key in ("name", "path"):
+        if not isinstance(t.get(key), str) or not t[key]:
+            raise ValueError(f"{where} needs a non-empty string {key!r}")
+    where = f"spec {p}: target {t['name']!r}"
+    raw_expected = t.get("expected", [])
+    if not isinstance(raw_expected, list):
+        raise ValueError(f"{where}: 'expected' must be a list")  # noqa: TRY004 - CLI refusal
+    expected = []
+    for j, e in enumerate(raw_expected):
+        if not isinstance(e, dict):
+            raise ValueError(f"{where}: expected vuln {j} must be a JSON object")  # noqa: TRY004 - CLI refusal
+        try:
+            expected.append(ExpectedVuln(**e))
+        except TypeError as exc:
+            raise ValueError(f"{where}: expected vuln {j} is malformed ({exc})") from None
+        for key in ("id", "file", "attack_class"):
+            if not isinstance(e[key], str):
+                raise ValueError(f"{where}: expected vuln {j} needs a string {key!r}")  # noqa: TRY004 - CLI refusal
+    return TargetSpec(name=t["name"], path=t["path"], expected=expected,
+                      decoy=bool(t.get("decoy", False)))
 
 
 # ---- scoring ------------------------------------------------------------
@@ -165,9 +197,12 @@ def _cell(finding: dict[str, Any]) -> tuple[str, str] | None:
     ``provenance.task_id`` (``hunt:<area>:<class>``, also stamped on gapfill
     hunts); ``None`` when there is no such provenance."""
     task_id = (finding.get("provenance") or {}).get("task_id", "")
-    parts = task_id.split(":")
-    if len(parts) >= 3 and parts[0] == "hunt":
-        return parts[1], parts[2]
+    # The class is the last field (attack classes never hold ":"); the area is
+    # everything between, so an area that holds ":" stays whole.
+    head, _, rest = task_id.partition(":")
+    area, sep, cls = rest.rpartition(":")
+    if head == "hunt" and sep and area and cls:
+        return area, cls
     return None
 
 
@@ -313,7 +348,9 @@ def run_benchmark(spec: BenchmarkSpec, *, finder_spec: str, validator_spec: str 
         findings = store.findings(run_id)
         score = score_target(target, findings)
         scores.append(score)
-        if record_training_signals:
+        # A target the cap cut short has misses that are not real misses: they
+        # would teach `missed_known` for bugs the hunter never got to look for.
+        if record_training_signals and not (budget is not None and budget.exhausted):
             _record_training_signals(store, run_id, target, score, findings, classes)
         c, priced = _run_cost(store, run_id)
         total_cost += c

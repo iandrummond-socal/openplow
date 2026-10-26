@@ -263,3 +263,59 @@ def test_exported_lessons_never_carry_target_content(tmp_path):
     assert any(texts[c] for c in ATTACK_CLASSES)
     leaks = [(s, where) for s in sorted(secrets) for where, text in texts.items() if s in text]
     assert leaks == []
+
+
+# ---- review fixes ------------------------------------------------------------------
+
+def test_cell_keeps_an_area_with_a_colon_whole():
+    def cell(task_id: str):
+        return bm._cell({"provenance": {"task_id": task_id}})
+
+    assert cell("hunt:src:client-side") == ("src", "client-side")
+    assert cell("hunt:C:/repo/src:client-side") == ("C:/repo/src", "client-side")
+    assert cell("hunt:a:b:ai-and-llm") == ("a:b", "ai-and-llm")
+    assert cell("hunt:src") is None and cell("recon:src:x") is None and cell("") is None
+    assert bm._cell({}) is None
+
+
+def test_no_training_signals_for_a_target_the_cap_cut_short(tmp_path, monkeypatch):
+    """The cap ends the run part-way, so the target's misses are bugs the hunter
+    never got to look for, not misses to learn from."""
+    full = bm.load_spec(TRAIN_SPEC)
+    spec = bm.BenchmarkSpec(name="cut", base_dir=full.base_dir,
+                            targets=[t for t in full.targets if t.name == "cmd-injection"])
+    budget = pricing.Budget(100.0)
+    real = bm.start_run
+
+    def start_then_exhaust(ctx):
+        real(ctx)
+        budget.refused += 1  # as if the cap refused a call during this target
+
+    monkeypatch.setattr(bm, "start_run", start_then_exhaust)
+    out = tmp_path / "cut"
+    report = bm.run_benchmark(spec, finder_spec=_miss_and_fp_fixture(tmp_path),
+                              validator_spec=None, sandbox_kind="stub", out_dir=out,
+                              budget=budget, record_training_signals=True)
+    assert report.targets[0].missed == ["cmd-injection"]
+    assert report.totals["cap_reached"] is True
+    assert not [r for r in _rows(out) if r["kind"] in feedback.TRAINING_KINDS]
+
+
+@pytest.mark.parametrize(("targets", "message"), [
+    ([{"path": "x"}], "target 0 needs a non-empty string 'name'"),
+    ([{"name": "x"}], "target 0 needs a non-empty string 'path'"),
+    ([{"name": 3, "path": "x"}], "target 0 needs a non-empty string 'name'"),
+    (["x"], "target 0 must be a JSON object"),
+    ([{"name": "x", "path": "x", "expected": [{"id": "a"}]}],
+     "target 'x': expected vuln 0 is malformed"),
+    ([{"name": "x", "path": "x", "expected": [{"id": "a", "file": "f", "attack_class": "c",
+                                               "colour": "red"}]}],
+     "target 'x': expected vuln 0 is malformed"),
+    ([{"name": "x", "path": "x", "expected": "a"}], "target 'x': 'expected' must be a list"),
+    ({"name": "x"}, "'targets' must be a list"),
+])
+def test_a_malformed_spec_is_a_value_error_naming_the_problem(tmp_path, targets, message):
+    p = tmp_path / "spec.json"
+    p.write_text(json.dumps({"name": "s", "targets": targets}))
+    with pytest.raises(ValueError, match=message.replace("(", r"\(")):
+        bm.load_spec(p)

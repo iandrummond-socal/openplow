@@ -113,7 +113,11 @@ def _print_cost(store: Store, run_id: str) -> None:
 def cmd_benchmark(args: argparse.Namespace) -> int:
     from .benchmark import load_spec, run_benchmark
 
-    spec = load_spec(args.spec)
+    try:
+        spec = load_spec(args.spec)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     lessons = None
     if args.lessons:
         from .feedback import load_lessons
@@ -201,9 +205,9 @@ def cmd_rescore(args: argparse.Namespace) -> int:
     from .benchmark import load_spec
     from .rescore import rescore
 
-    spec = load_spec(args.spec)
     out_dir = Path(args.out).resolve() if args.out else None
     try:
+        spec = load_spec(args.spec)
         report = rescore(Path(args.run_dir), spec, out_dir,
                          rerun_fix_gate=args.rerun_fix_gate, sandbox_kind=args.sandbox,
                          assume_targets_unchanged=args.assume_targets_unchanged)

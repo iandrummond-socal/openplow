@@ -20,6 +20,8 @@ manifests.
   (zipp DoS, PyJWT key confusion), renamed so the finder cannot recognize the
   project. See [`upstream/README.md`](upstream/README.md). Its
   `with-decoys.json` adds a bug-free twin of each target for false positives.
+- `feedback/` — the fixture for the free run of the feedback-loop held-out test.
+  See [`feedback/README.md`](feedback/README.md).
 
 ## Run the sample
 
@@ -71,8 +73,10 @@ openplow benchmark benchmarks/sample/benchmark.json \
 ```
 
 Paths are relative to the spec file. A finding matches a known vuln when they
-share the **file** and **attack class**, and — when given — the **symbol**
-appears in the finding and the **line** falls in `line_range`.
+share the **file** and — when given — the **symbol** appears in the finding and
+the finding's **line**, if it gives one, falls in `line_range`. The attack class is not compared (the same
+bug is legitimately found from several class angles); it is informational, but
+keep it accurate: the feedback loop files a missed known vuln under it.
 
 Good sources of known-vuln targets: CVE-fix commits (check out the parent of the
 fix), deliberately vulnerable apps, and OSS-Fuzz reproducers.
@@ -85,10 +89,20 @@ fix), deliberately vulnerable apps, and OSS-Fuzz reproducers.
 | confirmed recall | known vulns matched by a **confirmed** finding / known vulns |
 | rejection rate | rejected findings / all candidate findings |
 | unmatched confirmed | confirmed findings matching no known vuln (false positive *or* a new bug) |
+| false positives | confirmed findings on a decoy target (a false positive by construction) |
+| coverage cells | distinct `(area, attack_class)` cells holding a confirmed, canonical finding on a non-decoy target |
 
 Recall is not recall against *all* bugs — no such labeled set exists. It
-measures only the bugs the manifest knows about. Use the rejection rate and the
-coverage signal (Gapfill, later) to reason about completeness.
+measures only the bugs the manifest knows about. Use the rejection rate and
+coverage cells to reason about completeness.
+
+## Feedback-loop held-out test
+
+`openplow feedback-eval` learns lessons on one benchmark and tests them on
+another it never trained on. The default split (train on `cve-and-decoys.json`,
+hold out `upstream/with-decoys.json`), the free and real commands, both
+`--compare` modes and how to read the verdict are in
+[`feedback/README.md`](feedback/README.md).
 
 ## Re-score a saved run (free)
 

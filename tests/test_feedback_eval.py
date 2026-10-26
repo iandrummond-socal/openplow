@@ -368,3 +368,110 @@ def test_cold_start_creates_the_out_dir(tmp_path, monkeypatch):
                                out_dir=out)
     assert (out / "feedback-eval.json").is_file() and (out / "lessons.json").is_file()
     assert report.verdict == "no change"
+
+
+# ---- review fixes ------------------------------------------------------------------
+
+def test_cli_exits_2_not_1_on_a_malformed_spec(tmp_path, monkeypatch, capsys):
+    """1 means regressed; a spec that cannot be read must never look like one."""
+    _install(monkeypatch, _Fake(_train_plan))
+    (tmp_path / "train").mkdir()
+    train = _write_spec(tmp_path / "train" / "train.json", [("train-a", False)])
+    hold = tmp_path / "hold.json"
+    hold.write_text(json.dumps({"name": "hold", "targets": [{"path": "hold-b"}]}))
+    out = tmp_path / "out"
+    code = cli.main(["feedback-eval", str(hold), "--train", str(train), "--adapter", "fake",
+                     "--out", str(out)])
+    assert code == 2
+    assert "needs a non-empty string 'name'" in capsys.readouterr().err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("which", ["train", "holdout"])
+@pytest.mark.parametrize("state", ["missing", "empty"])
+def test_a_missing_or_empty_target_dir_is_refused_by_its_own_name(tmp_path, monkeypatch,
+                                                                  which, state):
+    _install(monkeypatch, _Fake(_train_plan))
+    train = _spec(tmp_path / "train", "train", [("train-a", False)])
+    holdout = _spec(tmp_path / "hold", "hold", [("hold-b", False)])
+    spec, name = (train, "train-a") if which == "train" else (holdout, "hold-b")
+    shutil.rmtree(spec.base_dir / name)
+    if state == "empty":
+        (spec.base_dir / name).mkdir()
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match=f"target '{name}': directory .* is missing or empty"):
+        run_feedback_eval(holdout, train_spec=train, finder_spec="fake", validator_spec=None,
+                          sandbox_kind="stub", out_dir=out)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("held_inside", [True, False])
+def test_a_target_nested_in_the_other_set_is_refused(tmp_path, monkeypatch, held_inside):
+    """A directory inside another holds part of its code under a new digest, so
+    neither the name nor the content check would catch it."""
+    _install(monkeypatch, _Fake(_train_plan))
+    _target(tmp_path, "outer", areas=("src", "lib"))
+    outer = TargetSpec(name="outer", path="outer")
+    inner = TargetSpec(name="inner", path="outer/lib")
+    train = BenchmarkSpec(name="train", base_dir=tmp_path,
+                          targets=[outer if held_inside else inner])
+    holdout = BenchmarkSpec(name="hold", base_dir=tmp_path,
+                            targets=[inner if held_inside else outer])
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="'inner'.*'outer'|'outer'.*'inner'") as exc:
+        run_feedback_eval(holdout, train_spec=train, finder_spec="fake", validator_spec=None,
+                          sandbox_kind="stub", out_dir=out)
+    assert "overlap" in str(exc.value)
+    assert not out.exists()
+
+
+def test_one_budget_reaches_every_phase(tmp_path, monkeypatch):
+    _install(monkeypatch, _Fake(_improving_plan))
+    real = openplow.benchmark.run_benchmark
+    seen: list[tuple[str, object]] = []
+
+    def spy(spec, *, out_dir, **kw):
+        seen.append((out_dir.name, kw.get("budget")))
+        assert kw.get("max_cost") is None, "a phase must not build a cap of its own"
+        return real(spec, out_dir=out_dir, **kw)
+
+    monkeypatch.setattr(openplow.benchmark, "run_benchmark", spy)
+    _eval(tmp_path, _spec(tmp_path / "hold", "hold", [("hold-b", False)]),
+          max_cost=100.0, repeats=2)
+    assert [name for name, _ in seen] == ["train", "holdout-baseline-1", "holdout-lessons-1",
+                                          "holdout-lessons-2", "holdout-baseline-2"]
+    budgets = [b for _, b in seen]
+    assert budgets[0] is not None and budgets[0].limit == 100.0
+    assert len(set(map(id, budgets))) == 1
+
+
+@pytest.mark.parametrize("decoy", [False, True])
+def test_zero_lessons_is_no_change_whatever_the_noise(tmp_path, monkeypatch, decoy):
+    """Training learns nothing, so both arms run identical prompts; the fake still
+    files a confirmed finding in arm B only (noise). On a real target that would
+    read as a coverage win, on a decoy as a false-positive regression."""
+    arm: dict[str, str] = {}
+
+    def plan(repo, area, lesson, gapfill):
+        assert not lesson
+        if repo == "hold-b" and arm.get("now") == "lessons":
+            return [_finding("noise", area, reproduces=True)]
+        return []
+
+    _install(monkeypatch, _Fake(plan))
+    real = openplow.benchmark.run_benchmark
+
+    def spy(spec, *, out_dir, **kw):
+        arm["now"] = out_dir.name.split("-")[1] if out_dir.name.startswith("holdout-") else ""
+        return real(spec, out_dir=out_dir, **kw)
+
+    monkeypatch.setattr(openplow.benchmark, "run_benchmark", spy)
+    report = _eval(tmp_path, _spec(tmp_path / "hold", "hold", [("hold-b", decoy)]))
+    assert report.lessons == {"version": 1, "lessons": []}
+    a, b = report.baseline_totals, report.lessons_totals
+    if decoy:
+        assert b["false_positives"] > a["false_positives"]
+    else:
+        assert b["cells_covered"] > a["cells_covered"]
+    assert report.verdict == "no change", report.verdict_reason
+    assert "any difference is noise" in report.verdict_reason
