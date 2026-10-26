@@ -154,15 +154,22 @@ def test_dev_nodes_work_and_the_tree_is_read_only(tmp_path: Path):
 
 
 @needs_unshare
-@pytest.mark.xfail(
-    not AS_ROOT, strict=True,
-    reason="known bug: as a non-root user the minimal /dev refuses open(O_CREAT) on its "
-           "nodes, so `> /dev/null` fails with EACCES. Bisected to minimal_dev (it passes "
-           "with minimal_dev=False); root is unaffected. Tracked in docs/HANDOFF.md.")
 def test_dev_null_can_be_redirected_to(tmp_path: Path):
-    # What a shell's `> /dev/null` and Python's open('/dev/null', 'w') both do.
+    # What a shell's `> /dev/null` and Python's open('/dev/null', 'w') both do. As a
+    # non-root user this failed with EACCES while the staged /dev was mode 1777.
     res = _py(_sandbox(tmp_path), "open('/dev/null', 'w').write('discarded'); print('ok')")
     assert res.returncode == 0 and res.stdout.strip() == "ok", res.stderr
+
+
+@needs_unshare
+def test_staged_trees_are_not_sticky_world_writable(tmp_path: Path):
+    # The cause of the non-root `> /dev/null` failure, checked directly so a run as root
+    # (where the symptom never shows) still catches a regression: in a sticky,
+    # world-writable directory the kernel refuses open(O_CREAT) on another user's node.
+    code = "import os\nfor p in ('/dev', '/'):\n    print(p, oct(os.stat(p).st_mode & 0o7777))\n"
+    res = _py(_sandbox(tmp_path), code)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.splitlines() == ["/dev 0o755", "/ 0o755"]
 
 
 @needs_unshare
