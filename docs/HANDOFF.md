@@ -20,7 +20,7 @@ state and next steps. Read both before starting.
 
 At that point the suite had 147 tests, all passing (24 of them run only on Linux), and lint is clean.
 
-**Feedback loop (branch `task/feedback-loop`).**
+**Feedback loop (PR #19, merged).**
 Failures are recorded as typed lesson signals and shown to every hunt still in the queue; lessons export and import as a text-free file; `openplow feedback-eval` tests them on a held-out benchmark (README, "Feedback loop").
 One visible behaviour change: the queue now claims `validate` tasks before `hunt` tasks (then oldest first), so each hunt's findings are judged, and their failures recorded, before the next hunt's prompt is built.
 Before, recon's hunts all ran before the first validation.
@@ -75,7 +75,6 @@ On macOS keep `OPENPLOW_SANDBOX=stub`: the `unshare` sandbox needs Linux.
 
 | Needs | Task |
 | --- | --- |
-| no credits | Sandbox bug: as a non-root user `> /dev/null` fails (EACCES on `open(O_CREAT)` of a minimal-`/dev` node); root is fine. Caused by `minimal_dev` (passes with `minimal_dev=False`). `tests/test_sandbox_isolation.py::test_dev_null_can_be_redirected_to` is a strict xfail for non-root: when it is fixed the test XPASSes and fails the run until the marker is removed |
 | no credits | Sandbox: `systemd-run --user` memory cap for desktop Linux, a non-privileged Linux CI job, loopback networking, runtime verification on x86_64 (roadmap M1) |
 | ~$2 credit | Decoys-only real run → first false-positive rate |
 | ~$5–6 credit | `benchmarks/cve-and-decoys.json` real run → honest recall and false positives in one report |
@@ -89,6 +88,8 @@ a synthesised `/etc`, an empty `/tmp`, `/dev`, `/proc`, scratch and the target, 
 `$HOME`, `/root`, `/var` or `/run`. A runtime outside `/usr` (nvm, pyenv, `/opt`) needs
 `expose=[...]` or `OPENPLOW_SANDBOX_EXPOSE`. `enforced` now
 also reports `minimal_dev`, `proc_hardened`, `unix_sockets_blocked` and `minimal_root`.
+The staged `/dev` and `/` are mode `0755`, not tmpfs's default `1777`: in a sticky,
+world-writable `/dev` a non-root caller's `> /dev/null` failed with EACCES.
 The minimal root is verified on aarch64 under Docker only (x86_64 and split-usr hosts
 are not runtime-verified), is Linux only, and still leaves `/usr` and `/proc/self/mountinfo`
 readable by design. The unix

@@ -324,12 +324,18 @@ def _stage(scratch: str) -> str:
     name is unique per call (``mkdtemp``), so two sandboxes sharing one scratch
     dir never collide and a directory left by a crashed run never causes EEXIST.
     Each caller uses its stage once, then detaches and removes it.
+
+    The tmpfs is mounted ``mode=0755``, not tmpfs's default ``1777``: the stage
+    becomes ``/dev`` (or ``/``), and in a sticky, world-writable directory the
+    kernel refuses ``open(O_CREAT)`` on a node owned by neither the caller nor
+    the directory's owner. As a non-root user the bound-in ``/dev/null`` is
+    owned by the unmapped host root, so ``> /dev/null`` failed with EACCES.
     """
     try:
         stage = tempfile.mkdtemp(prefix=".openplow-stage-", dir=scratch)
     except OSError as exc:
         _fail(f"could not create a staging directory in {scratch!r}: {exc}")
-    _mount(_libc(), "tmpfs", stage, "tmpfs", 0)
+    _mount(_libc(), "tmpfs", stage, "tmpfs", 0, "mode=0755")
     return stage
 
 
