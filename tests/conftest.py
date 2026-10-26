@@ -20,10 +20,36 @@ from __future__ import annotations
 import functools
 import os
 import sys
+from collections.abc import Callable, Mapping
 
 import pytest
 
 from openplow.sandbox import UnshareSandbox
+
+REQUIRE_SANDBOX = "OPENPLOW_REQUIRE_SANDBOX"
+
+
+def _missing_sandbox(environ: Mapping[str, str], unshare_works: Callable[[], bool]) -> str | None:
+    """Why the run must stop, when the real sandbox is required but cannot start.
+
+    Every real-sandbox test skips when unprivileged user namespaces are unavailable,
+    which is right on a laptop and wrong in CI: on GitHub's Ubuntu 24.04 runners
+    AppArmor blocked them and all of those tests skipped while the run stayed green.
+    CI sets ``OPENPLOW_REQUIRE_SANDBOX=1`` so a lost sandbox is a red run instead.
+    """
+    if environ.get(REQUIRE_SANDBOX) != "1" or unshare_works():
+        return None
+    return (f"{REQUIRE_SANDBOX}=1 but `unshare --user` cannot start a sandbox here, so "
+            "every real-sandbox test would skip. On Ubuntu 23.10+ lift the AppArmor "
+            "restriction: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0")
+
+
+def pytest_sessionstart(session):
+    from test_sandbox_hardening import _unshare_works
+
+    reason = _missing_sandbox(os.environ, _unshare_works)
+    if reason:
+        pytest.exit(reason, returncode=1)
 
 
 def _interpreter_roots() -> tuple[str, ...]:

@@ -145,6 +145,24 @@ def _py(sb: UnshareSandbox, code: str, cwd=None):
     return sb.run([sys.executable, "-c", code], cwd=cwd)
 
 
+def test_a_required_sandbox_that_cannot_start_stops_the_run():
+    from conftest import _missing_sandbox
+
+    def broken() -> bool:
+        return False
+
+    def works() -> bool:
+        return True
+
+    required = {"OPENPLOW_REQUIRE_SANDBOX": "1"}
+    reason = _missing_sandbox(required, broken)
+    assert reason and "apparmor_restrict_unprivileged_userns=0" in reason
+    assert _missing_sandbox(required, works) is None
+    # Unset (a laptop, macOS) or any other value: skipping stays the right answer.
+    assert _missing_sandbox({}, broken) is None
+    assert _missing_sandbox({"OPENPLOW_REQUIRE_SANDBOX": "0"}, broken) is None
+
+
 @needs_unshare
 def test_unshare_writes_only_inside_scratch(tmp_path: Path):
     sb = UnshareSandbox(tmp_path / "scratch", timeout=20)

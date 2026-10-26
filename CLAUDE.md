@@ -13,8 +13,11 @@ ruff check openplow tests          # lint — must be clean
 python -m pytest -q                # tests — no API key needed, ~10 s
 ```
 
-CI runs exactly these on Python 3.11 and 3.13 for every PR and push to `main`.
-Run both locally before pushing.
+CI runs exactly these on Python 3.11 and 3.13 for every PR and push to `main`,
+with two additions: it lifts Ubuntu's AppArmor block on unprivileged user namespaces
+so the real-sandbox tests run (as the non-root `runner` user), and it sets
+`OPENPLOW_REQUIRE_SANDBOX=1`, which stops the run if the sandbox can't start instead
+of letting those tests skip. Run both locally before pushing.
 
 Free, offline checks of pipeline changes:
 
